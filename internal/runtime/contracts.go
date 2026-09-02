@@ -260,6 +260,10 @@ var allowedTransitions = map[TaskStatus]map[TaskStatus]bool{
 	TaskReviewing:       {TaskCompleted: true, TaskCoding: true, TaskWaiting: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskWaiting:         {TaskCoding: true, TaskValidating: true, TaskReviewing: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskWaitingApproval: {TaskPlanning: true, TaskCoding: true, TaskValidating: true, TaskReviewing: true, TaskCancelled: true, TaskTimedOut: true},
+	TaskCompleted:       {TaskPreparing: true},
+	TaskFailed:          {TaskPreparing: true},
+	TaskCancelled:       {TaskPreparing: true},
+	TaskTimedOut:        {TaskPreparing: true},
 }
 
 type RunStateTransition struct {
