@@ -33,8 +33,16 @@ func (controller *fakeController) Submit(_ context.Context, _ erkaruntime.TaskID
 func (*fakeController) RunNext(context.Context) (app.LocalResult, bool, error) {
 	return app.LocalResult{Status: erkaruntime.TaskCompleted}, true, nil
 }
-func (*fakeController) Cancel()                                {}
-func (controller *fakeController) SetFullExecution(value bool) { controller.full = value }
+func (*fakeController) Resume(context.Context, erkaruntime.TaskID) (app.LocalResult, error) {
+	return app.LocalResult{Status: erkaruntime.TaskCompleted}, nil
+}
+func (*fakeController) Diff(context.Context) (string, error) { return "diff --git a/a b/a", nil }
+func (*fakeController) UnknownOutcome(context.Context, erkaruntime.TaskID) (erkaruntime.ToolCall, bool, error) {
+	return erkaruntime.ToolCall{}, false, nil
+}
+func (*fakeController) ResolveUnknown(context.Context, erkaruntime.TaskID, bool) error { return nil }
+func (*fakeController) Cancel()                                                        {}
+func (controller *fakeController) SetFullExecution(value bool)                         { controller.full = value }
 
 func TestModelSubmitClearsComposerAndQueuesPrompt(t *testing.T) {
 	controller := &fakeController{}
@@ -69,6 +77,19 @@ func TestModelResponsiveLayoutAndHelp(t *testing.T) {
 	}
 }
 
+func TestPermissionDialogRequiresConfirmationAndIsSessionOnly(t *testing.T) {
+	controller := &fakeController{}
+	model := NewModel(Options{Controller: controller})
+	model.Update(key("ctrl+p"))
+	if model.overlay != "permission" || model.full {
+		t.Fatalf("permission overlay = %q, full = %v", model.overlay, model.full)
+	}
+	model.Update(key("y"))
+	if !model.full || !controller.full || model.overlay != "" {
+		t.Fatalf("full = %v/%v overlay=%q", model.full, controller.full, model.overlay)
+	}
+}
+
 func TestSanitizeRemovesTerminalInjectionAndBoundsOutput(t *testing.T) {
 	input := "safe\x1b[31mred\x1b[0m\x1b]8;;https://bad.example\x07link\x1b]8;;\x07\x00end"
 	got := Sanitize(input)
@@ -86,6 +107,10 @@ func key(value string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyEnter}
 	case "?":
 		return tea.KeyPressMsg{Code: '?', Text: "?"}
+	case "ctrl+p":
+		return tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl}
+	case "y":
+		return tea.KeyPressMsg{Code: 'y', Text: "y"}
 	default:
 		return tea.KeyPressMsg{}
 	}

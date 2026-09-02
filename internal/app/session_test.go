@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -46,6 +47,37 @@ func TestSessionRunsQueuedFollowUpsWithConversationHistory(t *testing.T) {
 	requests := provider.Requests()
 	if len(requests) != 2 || len(requests[1].Items) < 3 || requests[1].Items[len(requests[1].Items)-1].Message.Content != "second prompt" {
 		t.Fatalf("second request history = %#v", requests)
+	}
+}
+
+func TestSessionResolvesUnknownMutationBeforeResume(t *testing.T) {
+	root, state := t.TempDir(), t.TempDir()
+	writeFixture(t, root)
+	initRepository(t, root)
+	taskID := seedPendingCall(t, root, state, erkaruntime.ToolCall{CallID: "pending-patch", Tool: "apply_patch", Arguments: json.RawMessage(`{"patch":"--- a/add.go\\n+++ b/add.go\\n"}`), Mutating: true, IdempotencyKey: "task/run/pending-patch"})
+	_, err := RunLocal(context.Background(), LocalOptions{WorkingDirectory: root, StateDir: state, ResumeTaskID: taskID, Provider: &scriptedProvider{name: "fixture"}, IDs: &sequenceIDs{}, Clock: fixedClock})
+	if err == nil {
+		t.Fatal("unknown mutation did not pause")
+	}
+	provider := &scriptedProvider{name: "fixture", responses: [][]erkaruntime.ModelOutput{{{Kind: erkaruntime.ModelTextDelta, Text: "recovered"}, {Kind: erkaruntime.ModelCompleted}}}}
+	session, err := OpenSession(context.Background(), SessionOptions{WorkingDirectory: root, StateDir: state, Provider: provider, IDs: &sequenceIDs{}, Clock: fixedClock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	call, ok, err := session.UnknownOutcome(context.Background(), taskID)
+	if err != nil || !ok || call.CallID != "pending-patch" {
+		t.Fatalf("unknown = %#v, %v, %v", call, ok, err)
+	}
+	if err := session.ResolveUnknown(context.Background(), taskID, true); err != nil {
+		t.Fatal(err)
+	}
+	result, err := session.Resume(context.Background(), taskID)
+	if err != nil || result.Status != erkaruntime.TaskCompleted {
+		t.Fatalf("resume = %#v, %v", result, err)
+	}
+	if requests := provider.Requests(); len(requests) != 1 || !hasResult(requests[0].Items, "pending-patch") {
+		t.Fatalf("requests = %#v", requests)
 	}
 }
 

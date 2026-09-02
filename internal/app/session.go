@@ -308,6 +308,96 @@ func (session *Session) Cancel() {
 
 func (session *Session) SetFullExecution(enabled bool) { session.options.AllowFullExecution = enabled }
 
+func (session *Session) Diff(ctx context.Context) (string, error) {
+	result, err := session.sandbox.Run(ctx, erkaruntime.CommandRequest{Executable: "git", Arguments: []string{"diff", "--no-ext-diff", "--"}, Directory: ".", Timeout: 10 * time.Second, OutputLimitBytes: 1 << 20})
+	if err != nil {
+		return "", err
+	}
+	if result.ExitCode != 0 {
+		return "", fmt.Errorf("git diff: %s", strings.TrimSpace(result.StandardError))
+	}
+	return result.StandardOutput, nil
+}
+
+func (session *Session) UnknownOutcome(ctx context.Context, taskID erkaruntime.TaskID) (erkaruntime.ToolCall, bool, error) {
+	items, err := session.database.LoadItems(ctx, taskID, 0)
+	if err != nil {
+		return erkaruntime.ToolCall{}, false, err
+	}
+	pending := make(map[erkaruntime.ToolCallID]erkaruntime.ToolCall)
+	order := make([]erkaruntime.ToolCallID, 0)
+	for _, item := range items {
+		switch item.Kind {
+		case erkaruntime.ItemToolCall:
+			pending[item.ToolCall.CallID] = *item.ToolCall
+			order = append(order, item.ToolCall.CallID)
+		case erkaruntime.ItemToolResult:
+			delete(pending, item.ToolResult.CallID)
+		}
+	}
+	for index := len(order) - 1; index >= 0; index-- {
+		if call, ok := pending[order[index]]; ok && call.Mutating {
+			return call, true, nil
+		}
+	}
+	return erkaruntime.ToolCall{}, false, nil
+}
+
+func (session *Session) ResolveUnknown(ctx context.Context, taskID erkaruntime.TaskID, success bool) error {
+	call, ok, err := session.UnknownOutcome(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("conversation has no unresolved mutating tool")
+	}
+	conversation, err := session.OpenConversation(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if conversation.Task.Status != erkaruntime.TaskWaiting {
+		return errors.New("conversation is not waiting for recovery")
+	}
+	var run erkaruntime.Run
+	for _, item := range conversation.Items {
+		if item.Kind == erkaruntime.ItemToolCall && item.ToolCall.CallID == call.CallID {
+			for _, candidate := range conversation.Runs {
+				if candidate.ID == item.RunID {
+					run = candidate
+					break
+				}
+			}
+			break
+		}
+	}
+	if run.ID == "" || run.Status != erkaruntime.RunWaiting {
+		return errors.New("unresolved tool run is not waiting")
+	}
+	itemID, err := session.options.IDs.NewID("item")
+	if err != nil {
+		return err
+	}
+	eventID, err := session.options.IDs.NewID("event")
+	if err != nil {
+		return err
+	}
+	now := session.options.Clock().UTC()
+	resultText := "User confirmed the interrupted tool completed successfully."
+	if !success {
+		resultText = "User confirmed the interrupted tool did not complete."
+	}
+	_, err = session.database.Commit(ctx, erkaruntime.CommitRequest{TaskID: taskID, ExpectedItemSequence: conversation.Task.LastItemSequence, ExpectedEventSequence: conversation.Task.LastEventSequence, Items: []erkaruntime.RuntimeItem{{ID: erkaruntime.ItemID(itemID), Sequence: conversation.Task.LastItemSequence + 1, TaskID: taskID, RunID: run.ID, Kind: erkaruntime.ItemToolResult, Time: now, ToolResult: &erkaruntime.ToolResult{CallID: call.CallID, Output: resultText, IsError: !success}}}, Events: []erkaruntime.Event{{ID: erkaruntime.EventID(eventID), Sequence: conversation.Task.LastEventSequence + 1, TaskID: taskID, RunID: run.ID, Type: "tool.resolved", Time: now, Message: "Interrupted tool outcome recorded"}}, Transition: &erkaruntime.StateTransition{TaskID: taskID, RunID: run.ID, From: erkaruntime.TaskWaiting, To: erkaruntime.TaskCoding}, RunTransition: &erkaruntime.RunStateTransition{TaskID: taskID, RunID: run.ID, From: erkaruntime.RunWaiting, To: erkaruntime.RunRunning}})
+	if err != nil {
+		return err
+	}
+	for _, turn := range conversation.Turns {
+		if turn.RunID == run.ID && turn.Status == store.TurnWaiting {
+			_ = session.database.UpdateTurnStatus(ctx, turn.ID, store.TurnWaiting, store.TurnRunning, now)
+		}
+	}
+	return nil
+}
+
 func (session *Session) persistInterruption(taskID erkaruntime.TaskID, runID erkaruntime.RunID, taskStatus erkaruntime.TaskStatus, runStatus erkaruntime.RunStatus, eventType string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
