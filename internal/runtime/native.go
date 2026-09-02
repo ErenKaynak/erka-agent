@@ -605,11 +605,20 @@ func newDurableAppender(ctx context.Context, request StageRequest, store Store, 
 
 func (appender *durableAppender) start(ctx context.Context, objective string) error {
 	switch appender.snapshot.Status {
-	case TaskQueued:
+	case TaskCompleted, TaskFailed, TaskCancelled, TaskTimedOut:
 		if err := appender.transition(ctx, TaskPreparing, []pendingEvent{{
-			Type: "task.started", Message: "Task started",
+			Type: "task.started", Message: "Follow-up turn started",
 		}}); err != nil {
 			return err
+		}
+		fallthrough
+	case TaskQueued:
+		if appender.snapshot.Status == TaskQueued {
+			if err := appender.transition(ctx, TaskPreparing, []pendingEvent{{
+				Type: "task.started", Message: "Task started",
+			}}); err != nil {
+				return err
+			}
 		}
 		fallthrough
 	case TaskPreparing:

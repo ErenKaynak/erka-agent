@@ -12,9 +12,6 @@ import (
 	"time"
 
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
-	"github.com/ErenKaynak/erka-agent/internal/sandbox"
-	"github.com/ErenKaynak/erka-agent/internal/store"
-	"github.com/ErenKaynak/erka-agent/internal/tools"
 )
 
 const nativeInstructions = `You are erka's coding stage. Work only inside the provided repository. Inspect relevant files, make the smallest correct change, run focused validation, inspect the final diff, and finish with a concise summary. Use tools for repository facts; never invent tool results.`
@@ -43,61 +40,38 @@ type LocalResult struct {
 // RunLocal creates or resumes one durable task and executes it directly in the
 // current repository. It starts no daemon or listener.
 func RunLocal(ctx context.Context, options LocalOptions) (LocalResult, error) {
-	if err := ctx.Err(); err != nil {
-		return LocalResult{}, err
-	}
 	if options.Provider == nil {
 		return LocalResult{}, errors.New("local run requires a model provider")
 	}
-	if !filepath.IsAbs(options.StateDir) {
-		return LocalResult{}, errors.New("local run requires an absolute state directory")
-	}
-	root, err := DiscoverRepository(options.WorkingDirectory)
+	session, err := OpenSession(ctx, SessionOptions{WorkingDirectory: options.WorkingDirectory, StateDir: options.StateDir, Provider: options.Provider, Output: options.Output, IDs: options.IDs, Clock: options.Clock, Limits: options.Limits, AllowFullExecution: options.AllowFullExecution})
 	if err != nil {
 		return LocalResult{}, err
 	}
-	localSandbox, err := sandbox.NewLocal(root, sandbox.Options{})
-	if err != nil {
-		return LocalResult{}, fmt.Errorf("initialize workspace sandbox: %w", err)
+	defer session.Close()
+	if session.ReadOnly() {
+		return LocalResult{}, errors.New("repository is already being executed by another erka process")
 	}
-	database, err := store.OpenSQLite(ctx, filepath.Join(options.StateDir, "erka.db"))
-	if err != nil {
-		return LocalResult{}, err
-	}
-	defer database.Close()
-
-	ids := options.IDs
-	if ids == nil {
-		ids = erkaruntime.RandomIDGenerator{}
-	}
-	clock := options.Clock
-	if clock == nil {
-		clock = func() time.Time { return time.Now().UTC() }
-	}
-
-	projectID := projectID(root)
-	if err := ensureProject(ctx, database, erkaruntime.Project{ID: projectID, Root: root, CreatedAt: clock()}); err != nil {
-		return LocalResult{}, err
-	}
-	task, run, err := prepareTask(ctx, database, options, projectID, ids, clock)
-	if err != nil {
-		return LocalResult{}, err
-	}
-	if options.Output != nil {
-		if _, err := fmt.Fprintf(options.Output, "task: %s\n", task.ID); err != nil {
+	taskID := options.ResumeTaskID
+	if taskID == "" {
+		taskID, err = session.Submit(ctx, "", options.Objective)
+		if err != nil {
 			return LocalResult{}, err
 		}
 	}
-
-	sink := &writerSink{writer: options.Output}
-	backend := &erkaruntime.NativeBackend{
-		Provider: options.Provider, Tools: tools.Builtins(localSandbox, tools.Options{AllowFullExecution: options.AllowFullExecution}), Sink: sink,
-		Instructions: nativeInstructions, Limits: options.Limits, IDs: ids, Clock: clock,
+	if options.Output != nil {
+		if _, err := fmt.Fprintf(options.Output, "task: %s\n", taskID); err != nil {
+			return LocalResult{}, err
+		}
 	}
-	stage, err := backend.RunStage(ctx, erkaruntime.StageRequest{TaskID: task.ID, RunID: run.ID, Objective: task.Objective}, database)
-	result := LocalResult{ProjectID: projectID, TaskID: task.ID, RunID: run.ID, Status: stage.Status}
-	if len(stage.Checkpoint.Decisions) > 0 {
-		result.Summary = stage.Checkpoint.Decisions[len(stage.Checkpoint.Decisions)-1]
+	var result LocalResult
+	if options.ResumeTaskID != "" {
+		result, err = session.Resume(ctx, taskID)
+	} else {
+		var ok bool
+		result, ok, err = session.RunNext(ctx)
+		if !ok && err == nil {
+			err = errors.New("submitted turn was not available")
+		}
 	}
 	if err != nil {
 		return result, err
