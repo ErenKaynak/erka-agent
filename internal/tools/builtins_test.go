@@ -95,6 +95,7 @@ func TestApplyPatchAndGitInspection(t *testing.T) {
 	runGit(t, root, "init", "--initial-branch=main")
 	runGit(t, root, "config", "user.email", "fixture@example.invalid")
 	runGit(t, root, "config", "user.name", "Fixture")
+	runGit(t, root, "config", "core.autocrlf", "false")
 	runGit(t, root, "add", "hello.txt")
 	runGit(t, root, "commit", "-m", "initial")
 	local := mustSandbox(t, root)

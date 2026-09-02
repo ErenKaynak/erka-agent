@@ -68,7 +68,17 @@ func OpenSQLite(ctx context.Context, filename string) (*SQLite, error) {
 }
 
 func sqliteDSN(filename string) string {
-	location := &url.URL{Scheme: "file", Path: filepath.ToSlash(filename)}
+	path := filepath.ToSlash(filename)
+	// A Windows drive path must occupy the URL path, not the authority. Without
+	// the leading slash, net/url serializes C:/... as file://C:/..., which SQLite
+	// rejects as an invalid URI authority.
+	if len(filename) >= 2 && filename[1] == ':' {
+		path = strings.ReplaceAll(filename, `\`, "/")
+	}
+	if len(path) >= 2 && path[1] == ':' && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	location := &url.URL{Scheme: "file", Path: path}
 	query := location.Query()
 	query.Set("_busy_timeout", "5000")
 	query.Set("_foreign_keys", "on")

@@ -14,6 +14,14 @@ import (
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 )
 
+func TestSQLiteDSNPlacesWindowsDriveInURLPath(t *testing.T) {
+	t.Parallel()
+	dsn := sqliteDSN(`C:\Users\erka\state\erka.db`)
+	if !strings.HasPrefix(dsn, "file:///C:/Users/erka/state/erka.db?") {
+		t.Fatalf("sqliteDSN() = %q", dsn)
+	}
+}
+
 func TestSQLiteMigratesPersistsAndReopens(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

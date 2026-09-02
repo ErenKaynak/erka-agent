@@ -131,6 +131,7 @@ func initRepository(t *testing.T, root string) {
 		{"init", "--initial-branch=main"},
 		{"config", "user.name", "Fixture"},
 		{"config", "user.email", "fixture@example.invalid"},
+		{"config", "core.autocrlf", "false"},
 		{"add", "."}, {"commit", "-m", "initial"},
 	} {
 		command := exec.Command("git", arguments...)
