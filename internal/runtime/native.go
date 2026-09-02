@@ -77,6 +77,7 @@ type NativeBackend struct {
 	Provider     ModelProvider
 	Tools        []Tool
 	Sink         EventSink
+	Observer     LiveObserver
 	Instructions string
 	Limits       NativeLimits
 	IDs          IDGenerator
@@ -134,7 +135,7 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 		if err := modelRequest.Validate(); err != nil {
 			return StageResult{}, prepared.fail(ctx, appender, "invalid_model_request", err)
 		}
-		response, err := prepared.readModelResponse(ctx, modelRequest)
+		response, err := prepared.readModelResponse(ctx, request, modelRequest)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return StageResult{}, err
@@ -152,6 +153,7 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 				return StageResult{}, err
 			}
 			history = append(history, committed...)
+			prepared.observe(ctx, LiveUpdate{TaskID: request.TaskID, RunID: request.RunID, Kind: LiveCommitted})
 		}
 
 		if len(calls) == 0 {
@@ -163,6 +165,7 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 		}
 
 		for _, call := range calls {
+			prepared.observe(ctx, LiveUpdate{TaskID: request.TaskID, RunID: request.RunID, Kind: LiveToolStarted, Tool: call.Tool, CallID: call.CallID})
 			result, executeErr := prepared.executeTool(ctx, call, toolOutputBytes)
 			if executeErr != nil {
 				if errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded) {
@@ -192,6 +195,7 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 				return StageResult{}, err
 			}
 			history = append(history, committed...)
+			prepared.observe(ctx, LiveUpdate{TaskID: request.TaskID, RunID: request.RunID, Kind: LiveToolFinished, Tool: call.Tool, CallID: call.CallID, IsError: result.IsError})
 		}
 	}
 
@@ -292,7 +296,7 @@ type assembledCall struct {
 	Arguments string
 }
 
-func (backend *preparedBackend) readModelResponse(ctx context.Context, request ModelRequest) (response assembledResponse, err error) {
+func (backend *preparedBackend) readModelResponse(ctx context.Context, stage StageRequest, request ModelRequest) (response assembledResponse, err error) {
 	stream, err := backend.Provider.Stream(ctx, request)
 	if err != nil {
 		return response, err
@@ -318,6 +322,7 @@ func (backend *preparedBackend) readModelResponse(ctx context.Context, request M
 		case ModelTextDelta:
 			response.text += output.Text
 			response.byteCount += int64(len(output.Text))
+			backend.observe(ctx, LiveUpdate{TaskID: stage.TaskID, RunID: stage.RunID, Kind: LiveTextDelta, Text: output.Text})
 		case ModelToolCallDelta:
 			delta := output.ToolCall
 			index, exists := callIndex[delta.CallID]
@@ -355,6 +360,14 @@ func (backend *preparedBackend) readModelResponse(ctx context.Context, request M
 			return response, fmt.Errorf("model output exceeds %d bytes", backend.Limits.MaxModelOutputBytes)
 		}
 	}
+}
+
+func (backend *preparedBackend) observe(ctx context.Context, update LiveUpdate) {
+	if backend.Observer == nil || ctx.Err() != nil {
+		return
+	}
+	update.Text = boundLiveText(update.Text)
+	backend.Observer.Observe(ctx, update)
 }
 
 func addUsage(total *Usage, next Usage) {

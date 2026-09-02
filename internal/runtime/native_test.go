@@ -98,6 +98,34 @@ func TestNativeBackendPersistsToolLoopInOrder(t *testing.T) {
 	}
 }
 
+func TestNativeBackendPublishesEphemeralUpdatesBeforeDurableCommitNotice(t *testing.T) {
+	t.Parallel()
+	memory, request, now := seededRuntime(t)
+	provider := &scriptedProvider{responses: [][]erkaruntime.ModelOutput{{
+		{Kind: erkaruntime.ModelTextDelta, Text: "live "},
+		{Kind: erkaruntime.ModelTextDelta, Text: "answer"},
+		{Kind: erkaruntime.ModelCompleted},
+	}}}
+	backend := testBackend(provider, nil, now)
+	var updates []erkaruntime.LiveUpdate
+	backend.Observer = erkaruntime.LiveObserverFunc(func(_ context.Context, update erkaruntime.LiveUpdate) {
+		updates = append(updates, update)
+	})
+	if _, err := backend.RunStage(context.Background(), request, memory); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) < 3 || updates[0].Kind != erkaruntime.LiveTextDelta || updates[0].Text != "live " || updates[1].Text != "answer" || updates[2].Kind != erkaruntime.LiveCommitted {
+		t.Fatalf("updates = %#v", updates)
+	}
+	items, err := memory.LoadItems(context.Background(), request.TaskID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[1].Kind != erkaruntime.ItemAssistantMessage || items[1].Message.Content != "live answer" {
+		t.Fatalf("durable assistant item = %#v", items[1])
+	}
+}
+
 func TestNativeBackendRejectsMalformedToolArguments(t *testing.T) {
 	t.Parallel()
 	memory, request, now := seededRuntime(t)
