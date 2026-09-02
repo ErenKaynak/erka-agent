@@ -91,6 +91,24 @@ func TestDiscoverRepositoryRejectsNonRepository(t *testing.T) {
 	}
 }
 
+func TestRunLocalPrintsTaskIDBeforeProviderFailure(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFixture(t, root)
+	initRepository(t, root)
+	var output strings.Builder
+	_, err := RunLocal(context.Background(), LocalOptions{
+		WorkingDirectory: root, StateDir: t.TempDir(), Objective: "fail after creation",
+		Provider: &scriptedProvider{name: "fixture"}, Output: &output, IDs: &sequenceIDs{}, Clock: fixedClock,
+	})
+	if err == nil {
+		t.Fatal("RunLocal() error = nil")
+	}
+	if !strings.HasPrefix(output.String(), "task: task_001\n") {
+		t.Fatalf("output = %q", output.String())
+	}
+}
+
 func writeFixture(t *testing.T, root string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(root, "nested"), 0o755); err != nil {

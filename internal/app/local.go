@@ -83,6 +83,11 @@ func RunLocal(ctx context.Context, options LocalOptions) (LocalResult, error) {
 	if err != nil {
 		return LocalResult{}, err
 	}
+	if options.Output != nil {
+		if _, err := fmt.Fprintf(options.Output, "task: %s\n", task.ID); err != nil {
+			return LocalResult{}, err
+		}
+	}
 
 	sink := &writerSink{writer: options.Output}
 	backend := &erkaruntime.NativeBackend{
@@ -98,7 +103,7 @@ func RunLocal(ctx context.Context, options LocalOptions) (LocalResult, error) {
 		return result, err
 	}
 	if options.Output != nil {
-		if _, err := fmt.Fprintf(options.Output, "\n%s\ntask: %s\n", result.Summary, result.TaskID); err != nil {
+		if _, err := fmt.Fprintf(options.Output, "\n%s\n", result.Summary); err != nil {
 			return result, err
 		}
 	}
