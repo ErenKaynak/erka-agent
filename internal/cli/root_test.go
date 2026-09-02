@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ErenKaynak/erka-agent/internal/buildinfo"
 	"github.com/ErenKaynak/erka-agent/internal/config"
+	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 )
 
 func TestExecuteVersion(t *testing.T) {
@@ -65,15 +69,15 @@ func TestExecuteRunRequiresPrompt(t *testing.T) {
 	}
 }
 
-func TestExecuteRunReportsM1Boundary(t *testing.T) {
+func TestExecuteRunInvokesLocalRuntime(t *testing.T) {
 	t.Parallel()
 
-	_, stderr, code := executeForTest(t, "run", "fix the tests")
-	if code != 1 {
-		t.Fatalf("Execute() code = %d, want 1", code)
+	stdout, stderr, code := executeForTest(t, "run", "fix the tests")
+	if code != 0 {
+		t.Fatalf("Execute() code = %d, want 0", code)
 	}
-	if !strings.Contains(stderr, ErrRuntimeUnavailable.Error()) {
-		t.Fatalf("Execute() stderr = %q, want runtime boundary", stderr)
+	if stdout != "ran: fix the tests\n" || stderr != "" {
+		t.Fatalf("stdout = %q, stderr = %q", stdout, stderr)
 	}
 }
 
@@ -101,13 +105,37 @@ func TestExecuteRunPassesConfigFlagsToLoader(t *testing.T) {
 		},
 		"--config", "/config.yaml",
 		"--state-dir", "/state",
-		"run", "fix the tests",
+		"--provider", "deepseek",
+		"--model", "deepseek-v4-pro",
+		"--provider-base-url", "https://deepseek.example",
+		"run", "--max-iterations", "9", "--max-output-tokens", "2048", "--timeout", "2m",
+		"fix the tests",
 	)
-	if code != 1 || !strings.Contains(stderr, ErrRuntimeUnavailable.Error()) {
+	if code != 0 || stderr != "" {
 		t.Fatalf("Execute() code = %d, stderr = %q", code, stderr)
 	}
-	if got.ConfigPath != "/config.yaml" || got.StateDir != "/state" {
+	if got.ConfigPath != "/config.yaml" || got.StateDir != "/state" || got.Provider != "deepseek" || got.Model != "deepseek-v4-pro" || got.BaseURL != "https://deepseek.example" || got.MaxIterations != 9 || got.MaxOutputTokens != 2048 || got.StageTimeout != 2*time.Minute {
 		t.Fatalf("config options = %#v", got)
+	}
+}
+
+func TestExecuteRunResumeDoesNotRequirePrompt(t *testing.T) {
+	t.Parallel()
+	stdout, stderr, code := executeForTest(t, "run", "--resume", "task_123")
+	if code != 0 || stderr != "" || stdout != "resumed: task_123\n" {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	_, stderr, code = executeForTest(t, "run", "--resume", "task_123", "new prompt")
+	if code != 2 || !strings.Contains(stderr, "cannot be combined") {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+}
+
+func TestRunConfiguredRequiresCredential(t *testing.T) {
+	t.Setenv("TEST_ERKA_MISSING_KEY", "")
+	err := runConfigured(context.Background(), config.Resolved{APIKeyEnv: "TEST_ERKA_MISSING_KEY"}, "fix", "", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "TEST_ERKA_MISSING_KEY") {
+		t.Fatalf("runConfigured() error = %v", err)
 	}
 }
 
@@ -149,6 +177,7 @@ func executeForTest(t *testing.T, args ...string) (string, string, int) {
 		func(context.Context, config.Options) (config.Resolved, error) {
 			return config.Resolved{}, nil
 		},
+		fakeRunner,
 	)
 	return stdout.String(), stderr.String(), code
 }
@@ -167,6 +196,15 @@ func executeForTestWithLoader(
 		Commit:  "abc123",
 		Date:    "2026-09-02T12:00:00Z",
 	}
-	code := execute(context.Background(), args, &stdout, &stderr, info, loader)
+	code := execute(context.Background(), args, &stdout, &stderr, info, loader, fakeRunner)
 	return stdout.String(), stderr.String(), code
+}
+
+func fakeRunner(_ context.Context, _ config.Resolved, objective string, resume erkaruntime.TaskID, output io.Writer) error {
+	if resume != "" {
+		_, _ = fmt.Fprintf(output, "resumed: %s\n", resume)
+		return nil
+	}
+	_, _ = fmt.Fprintf(output, "ran: %s\n", objective)
+	return nil
 }

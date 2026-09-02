@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultPaths(t *testing.T) {
@@ -162,6 +163,43 @@ func TestLoadAllowsMissingDefaultConfig(t *testing.T) {
 	if got.StateDir != "/home/erka/.local/state/erka" {
 		t.Fatalf("Load() state = %q", got.StateDir)
 	}
+	if got.Provider != DefaultProvider || got.Model != DefaultModel || got.BaseURL != DefaultDeepSeekURL || got.APIKeyEnv != DefaultAPIKeyEnv || got.MaxIterations != DefaultMaxIterations || got.MaxOutputTokens != DefaultMaxOutputToken || got.StageTimeout != DefaultStageTimeout {
+		t.Fatalf("Load() provider/runtime defaults = %#v", got)
+	}
+}
+
+func TestLoadProviderAndRuntimePrecedence(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yaml")
+	content := `version: 1
+provider:
+  type: deepseek
+  model: config-model
+  base_url: https://config.example
+  api_key_env: CONFIG_KEY
+runtime:
+  max_iterations: 4
+  max_output_tokens: 1000
+  stage_timeout: 1m
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(context.Background(), Options{
+		ConfigPath: configPath, GOOS: "linux", HomeDir: "/home/erka",
+		Model: "flag-model", MaxIterations: 8,
+		LookupEnv: lookup(map[string]string{
+			"ERKA_MODEL": "env-model", "ERKA_DEEPSEEK_BASE_URL": "https://env.example",
+			"ERKA_API_KEY_ENV": "ENV_KEY", "ERKA_MAX_OUTPUT_TOKENS": "2000", "ERKA_STAGE_TIMEOUT": "2m",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Model != "flag-model" || got.ModelSource != SourceFlag || got.BaseURL != "https://env.example" || got.BaseURLSource != SourceEnvironment || got.APIKeyEnv != "ENV_KEY" || got.MaxIterations != 8 || got.MaxOutputTokens != 2000 || got.StageTimeout != 2*time.Minute {
+		t.Fatalf("resolved = %#v", got)
+	}
 }
 
 func TestLoadRejectsMissingExplicitConfig(t *testing.T) {
@@ -194,6 +232,11 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 		{name: "unsupported version", content: "version: 2\n", want: "unsupported config version"},
 		{name: "multiple documents", content: "version: 1\n---\nversion: 1\n", want: "multiple YAML documents"},
 		{name: "relative state", content: "version: 1\nstate_dir: relative\n", want: "state directory must be absolute"},
+		{name: "unsupported provider", content: "version: 1\nprovider:\n  type: other\n", want: "unsupported native provider"},
+		{name: "invalid timeout", content: "version: 1\nruntime:\n  stage_timeout: tomorrow\n", want: "runtime.stage_timeout"},
+		{name: "negative limit", content: "version: 1\nruntime:\n  max_iterations: -1\n", want: "runtime limits must be positive"},
+		{name: "invalid key environment", content: "version: 1\nprovider:\n  api_key_env: BAD-NAME\n", want: "invalid API key environment"},
+		{name: "leaky key environment", content: "version: 1\nprovider:\n  api_key_env: PATH\n", want: "general subprocess variable"},
 	}
 
 	for _, test := range tests {
