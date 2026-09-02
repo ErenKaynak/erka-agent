@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ErenKaynak/erka-agent/internal/app"
+	"github.com/ErenKaynak/erka-agent/internal/auth"
 	"github.com/ErenKaynak/erka-agent/internal/buildinfo"
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	"github.com/ErenKaynak/erka-agent/internal/providers/deepseek"
@@ -189,9 +190,19 @@ func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimi
 }
 
 func runConfigured(ctx context.Context, resolved config.Resolved, objective string, resume erkaruntime.TaskID, output io.Writer) error {
-	key, ok := os.LookupEnv(resolved.APIKeyEnv)
-	if !ok || strings.TrimSpace(key) == "" {
-		return fmt.Errorf("DeepSeek credential is missing: set %s", resolved.APIKeyEnv)
+	providerName, baseURL := resolved.Provider, resolved.BaseURL
+	if providerName == "" {
+		providerName = "deepseek"
+	}
+	if baseURL == "" {
+		baseURL = deepseek.DefaultBaseURL
+	}
+	key, _, err := auth.NewDefaultManager().Resolve(ctx, providerName, baseURL, resolved.APIKeyEnv)
+	if errors.Is(err, auth.ErrCredentialNotFound) {
+		return fmt.Errorf("DeepSeek credential is missing: set %s or launch interactive erka", resolved.APIKeyEnv)
+	}
+	if err != nil {
+		return fmt.Errorf("resolve DeepSeek credential: %w", err)
 	}
 	provider, err := deepseek.New(deepseek.Options{APIKey: key, BaseURL: resolved.BaseURL, Model: resolved.Model})
 	if err != nil {
