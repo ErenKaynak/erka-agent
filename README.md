@@ -55,9 +55,11 @@ multi-user SaaS, distributed workers, or automatic deployment.
 
 ## Current status
 
-M0 foundation work is in progress. The CLI and internal contracts are not yet a
-usable coding agent. Early commands may intentionally report that their runtime
-stage has not been implemented.
+M0 foundation work is complete. `erka help` and `erka version` are functional,
+portable configuration and state paths are defined, and the provider-neutral
+runtime contracts are covered by cross-platform CI. `erka run` intentionally
+reports that the local runtime is unavailable until the M1 vertical slice is
+implemented.
 
 ## Security posture
 
