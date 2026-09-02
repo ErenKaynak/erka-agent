@@ -162,6 +162,10 @@ func (item RuntimeItem) Validate() error {
 	return nil
 }
 
+// ValidateRuntimeItem exposes canonical item validation to store and provider
+// implementations.
+func ValidateRuntimeItem(item RuntimeItem) error { return item.Validate() }
+
 func (call ToolCall) Validate() error {
 	if call.CallID == "" || call.Tool == "" {
 		return errors.New("tool call requires a call ID and tool name")

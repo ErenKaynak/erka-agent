@@ -92,6 +92,19 @@ func (memory *Memory) CreateRun(ctx context.Context, run erkaruntime.Run) error 
 	return nil
 }
 
+func (memory *Memory) LoadProject(ctx context.Context, projectID erkaruntime.ProjectID) (erkaruntime.Project, error) {
+	if err := ctx.Err(); err != nil {
+		return erkaruntime.Project{}, err
+	}
+	memory.mu.RLock()
+	defer memory.mu.RUnlock()
+	project, exists := memory.projects[projectID]
+	if !exists {
+		return erkaruntime.Project{}, fmt.Errorf("project %q: %w", projectID, erkaruntime.ErrNotFound)
+	}
+	return project, nil
+}
+
 func (memory *Memory) LoadTask(ctx context.Context, taskID erkaruntime.TaskID) (erkaruntime.TaskSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return erkaruntime.TaskSnapshot{}, err
@@ -103,7 +116,7 @@ func (memory *Memory) LoadTask(ctx context.Context, taskID erkaruntime.TaskID) (
 		return erkaruntime.TaskSnapshot{}, fmt.Errorf("task %q: %w", taskID, erkaruntime.ErrNotFound)
 	}
 	return erkaruntime.TaskSnapshot{
-		TaskID: task.ID, Status: task.Status,
+		Task:             task.Task,
 		LastItemSequence: task.LastItemSequence, LastEventSequence: task.LastEventSequence,
 	}, nil
 }

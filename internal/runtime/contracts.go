@@ -320,8 +320,7 @@ func (request CommitRequest) Validate() error {
 }
 
 type TaskSnapshot struct {
-	TaskID            TaskID
-	Status            TaskStatus
+	Task
 	LastItemSequence  uint64
 	LastEventSequence uint64
 }
@@ -332,6 +331,7 @@ type Store interface {
 	CreateProject(context.Context, Project) error
 	CreateTask(context.Context, Task) error
 	CreateRun(context.Context, Run) error
+	LoadProject(context.Context, ProjectID) (Project, error)
 	LoadTask(context.Context, TaskID) (TaskSnapshot, error)
 	LoadRun(context.Context, RunID) (Run, error)
 	LoadItems(context.Context, TaskID, uint64) ([]RuntimeItem, error)

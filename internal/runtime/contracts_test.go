@@ -254,6 +254,9 @@ type fakeStore struct{}
 func (fakeStore) CreateProject(ctx context.Context, _ Project) error { return ctx.Err() }
 func (fakeStore) CreateTask(ctx context.Context, _ Task) error       { return ctx.Err() }
 func (fakeStore) CreateRun(ctx context.Context, _ Run) error         { return ctx.Err() }
+func (fakeStore) LoadProject(ctx context.Context, _ ProjectID) (Project, error) {
+	return Project{}, ctx.Err()
+}
 func (fakeStore) LoadTask(ctx context.Context, _ TaskID) (TaskSnapshot, error) {
 	return TaskSnapshot{}, ctx.Err()
 }
