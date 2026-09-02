@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -229,7 +228,7 @@ func nonEmptyEnv(lookupEnv func(string) (string, bool), key string) (string, boo
 
 func platformJoin(goos string, elements ...string) string {
 	if goos != "windows" {
-		return filepath.Join(elements...)
+		return path.Join(elements...)
 	}
 
 	normalized := make([]string, 0, len(elements))
@@ -241,7 +240,7 @@ func platformJoin(goos string, elements ...string) string {
 
 func isPlatformAbs(goos string, value string) bool {
 	if goos != "windows" {
-		return filepath.IsAbs(value)
+		return path.IsAbs(value)
 	}
 	value = strings.ReplaceAll(value, "/", `\`)
 	return strings.HasPrefix(value, `\\`) ||
