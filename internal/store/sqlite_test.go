@@ -25,20 +25,37 @@ func TestSQLiteMigratesPersistsAndReopens(t *testing.T) {
 		t.Fatalf("OpenSQLite() error = %v", err)
 	}
 	seedSQLite(t, ctx, database, now)
-	request := erkaruntime.CommitRequest{
+	if _, err := database.Commit(ctx, erkaruntime.CommitRequest{
 		TaskID: "task-1",
+		Events: []erkaruntime.Event{{
+			ID: "event-1", Sequence: 1, TaskID: "task-1", RunID: "run-1",
+			Type: "task.started", Time: now,
+		}},
+		Transition: &erkaruntime.StateTransition{
+			TaskID: "task-1", RunID: "run-1",
+			From: erkaruntime.TaskQueued, To: erkaruntime.TaskPreparing,
+		},
+	}); err != nil {
+		t.Fatalf("prepare Commit() error = %v", err)
+	}
+	request := erkaruntime.CommitRequest{
+		TaskID: "task-1", ExpectedEventSequence: 1,
 		Items: []erkaruntime.RuntimeItem{
 			toolCallItem(now, 1, "item-1", "call-1"),
 			toolResultItem(now.Add(time.Second), 2, "item-2", "call-1"),
 		},
 		Events: []erkaruntime.Event{{
-			ID: "event-1", Sequence: 1, TaskID: "task-1", RunID: "run-1",
+			ID: "event-2", Sequence: 2, TaskID: "task-1", RunID: "run-1",
 			Type: "tool.completed", Time: now.Add(time.Second), Message: "read x",
 			Data: json.RawMessage(`{"tool":"read_file"}`),
 		}},
 		Transition: &erkaruntime.StateTransition{
 			TaskID: "task-1", RunID: "run-1",
-			From: erkaruntime.TaskQueued, To: erkaruntime.TaskPreparing,
+			From: erkaruntime.TaskPreparing, To: erkaruntime.TaskCoding,
+		},
+		RunTransition: &erkaruntime.RunStateTransition{
+			TaskID: "task-1", RunID: "run-1",
+			From: erkaruntime.RunQueued, To: erkaruntime.RunRunning,
 		},
 	}
 	if _, err := database.Commit(ctx, request); err != nil {
@@ -61,11 +78,11 @@ func TestSQLiteMigratesPersistsAndReopens(t *testing.T) {
 		t.Fatalf("tool call did not round trip: %#v", items[0])
 	}
 	events, err := reopened.LoadEvents(ctx, "task-1", 0)
-	if err != nil || len(events) != 1 || string(events[0].Data) != `{"tool":"read_file"}` {
+	if err != nil || len(events) != 2 || string(events[1].Data) != `{"tool":"read_file"}` {
 		t.Fatalf("LoadEvents() = %#v, %v", events, err)
 	}
 	snapshot, err := reopened.LoadTask(ctx, "task-1")
-	if err != nil || snapshot.Status != erkaruntime.TaskPreparing || snapshot.LastItemSequence != 2 || snapshot.Objective != "fix tests" {
+	if err != nil || snapshot.Status != erkaruntime.TaskCoding || snapshot.LastItemSequence != 2 || snapshot.Objective != "fix tests" {
 		t.Fatalf("LoadTask() = %#v, %v", snapshot, err)
 	}
 	project, err := reopened.LoadProject(ctx, snapshot.ProjectID)
@@ -73,7 +90,7 @@ func TestSQLiteMigratesPersistsAndReopens(t *testing.T) {
 		t.Fatalf("LoadProject() = %#v, %v", project, err)
 	}
 	run, err := reopened.LoadRun(ctx, "run-1")
-	if err != nil || !run.CreatedAt.Equal(now) {
+	if err != nil || !run.CreatedAt.Equal(now) || run.Status != erkaruntime.RunRunning {
 		t.Fatalf("LoadRun() = %#v, %v", run, err)
 	}
 

@@ -181,6 +181,12 @@ func (memory *Memory) Commit(ctx context.Context, request erkaruntime.CommitRequ
 	if err := memory.validateRunReferences(request); err != nil {
 		return erkaruntime.CommittedBatch{}, err
 	}
+	if request.RunTransition != nil {
+		run := memory.runs[request.RunTransition.RunID]
+		if run.Status != request.RunTransition.From {
+			return erkaruntime.CommittedBatch{}, fmt.Errorf("run %q status changed: %w", run.ID, erkaruntime.ErrConflict)
+		}
+	}
 
 	validator := erkaruntime.NewTranscriptValidator()
 	for _, item := range memory.items[request.TaskID] {
@@ -211,6 +217,11 @@ func (memory *Memory) Commit(ctx context.Context, request erkaruntime.CommitRequ
 		task.Status = request.Transition.To
 	}
 	memory.tasks[request.TaskID] = task
+	if request.RunTransition != nil {
+		run := memory.runs[request.RunTransition.RunID]
+		run.Status = request.RunTransition.To
+		memory.runs[run.ID] = run
+	}
 
 	return erkaruntime.CommittedBatch{
 		TaskID: request.TaskID, LastItemSequence: task.LastItemSequence,
@@ -243,7 +254,12 @@ func (memory *Memory) validateRunReferences(request erkaruntime.CommitRequest) e
 		}
 	}
 	if request.Transition != nil {
-		return check(request.Transition.RunID)
+		if err := check(request.Transition.RunID); err != nil {
+			return err
+		}
+	}
+	if request.RunTransition != nil {
+		return check(request.RunTransition.RunID)
 	}
 	return nil
 }

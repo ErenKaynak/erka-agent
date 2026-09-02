@@ -343,11 +343,38 @@ func (store *SQLite) Commit(ctx context.Context, request erkaruntime.CommitReque
 	if err := validateRunReferencesTx(ctx, tx, request); err != nil {
 		return batch, err
 	}
+	if request.RunTransition != nil {
+		var status string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = ?`, request.RunTransition.RunID).Scan(&status); err != nil {
+			return batch, fmt.Errorf("load run %q status: %w", request.RunTransition.RunID, err)
+		}
+		if erkaruntime.RunStatus(status) != request.RunTransition.From {
+			return batch, fmt.Errorf("run %q status changed: %w", request.RunTransition.RunID, erkaruntime.ErrConflict)
+		}
+	}
 	if err := insertItemsTx(ctx, tx, request.Items); err != nil {
 		return batch, err
 	}
 	if err := insertEventsTx(ctx, tx, request.Events); err != nil {
 		return batch, err
+	}
+	if request.RunTransition != nil {
+		result, updateErr := tx.ExecContext(ctx, `
+			UPDATE runs SET status = ?, updated_at = ?
+			WHERE id = ? AND status = ?`,
+			request.RunTransition.To, formatTime(commitTime(request)),
+			request.RunTransition.RunID, request.RunTransition.From,
+		)
+		if updateErr != nil {
+			return batch, fmt.Errorf("update run %q: %w", request.RunTransition.RunID, updateErr)
+		}
+		count, countErr := result.RowsAffected()
+		if countErr != nil {
+			return batch, fmt.Errorf("check run %q update: %w", request.RunTransition.RunID, countErr)
+		}
+		if count != 1 {
+			return batch, fmt.Errorf("run %q changed during commit: %w", request.RunTransition.RunID, erkaruntime.ErrConflict)
+		}
 	}
 
 	lastItem := current.LastItemSequence
@@ -495,7 +522,12 @@ func validateRunReferencesTx(ctx context.Context, tx *sql.Tx, request erkaruntim
 		}
 	}
 	if request.Transition != nil {
-		return check(request.Transition.RunID)
+		if err := check(request.Transition.RunID); err != nil {
+			return err
+		}
+	}
+	if request.RunTransition != nil {
+		return check(request.RunTransition.RunID)
 	}
 	return nil
 }

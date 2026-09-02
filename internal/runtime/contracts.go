@@ -240,6 +240,8 @@ func (transition StateTransition) Validate() error {
 
 var ErrInvalidTransition = errors.New("invalid task state transition")
 
+var ErrInvalidRunTransition = errors.New("invalid run state transition")
+
 var allowedTransitions = map[TaskStatus]map[TaskStatus]bool{
 	TaskQueued:          {TaskPreparing: true, TaskCancelled: true},
 	TaskPreparing:       {TaskPlanning: true, TaskCoding: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
@@ -251,6 +253,37 @@ var allowedTransitions = map[TaskStatus]map[TaskStatus]bool{
 	TaskWaitingApproval: {TaskPlanning: true, TaskCoding: true, TaskValidating: true, TaskReviewing: true, TaskCancelled: true, TaskTimedOut: true},
 }
 
+type RunStateTransition struct {
+	TaskID TaskID
+	RunID  RunID
+	From   RunStatus
+	To     RunStatus
+}
+
+func (transition RunStateTransition) Validate() error {
+	if transition.TaskID == "" || transition.RunID == "" {
+		return ErrInvalidRunTransition
+	}
+	allowed := allowedRunTransitions[transition.From]
+	if !allowed[transition.To] {
+		return ErrInvalidRunTransition
+	}
+	return nil
+}
+
+var allowedRunTransitions = map[RunStatus]map[RunStatus]bool{
+	RunQueued: {
+		RunRunning: true, RunFailed: true, RunCancelled: true,
+	},
+	RunRunning: {
+		RunCompleted: true, RunFailed: true, RunWaiting: true,
+		RunCancelled: true, RunTimedOut: true,
+	},
+	RunWaiting: {
+		RunRunning: true, RunFailed: true, RunCancelled: true,
+	},
+}
+
 type CommitRequest struct {
 	TaskID                TaskID
 	ExpectedItemSequence  uint64
@@ -258,6 +291,7 @@ type CommitRequest struct {
 	Items                 []RuntimeItem
 	Events                []Event
 	Transition            *StateTransition
+	RunTransition         *RunStateTransition
 }
 
 type CommittedBatch struct {
@@ -271,7 +305,7 @@ func (request CommitRequest) Validate() error {
 	if request.TaskID == "" {
 		return errors.New("commit requires a task ID")
 	}
-	if len(request.Items) == 0 && len(request.Events) == 0 && request.Transition == nil {
+	if len(request.Items) == 0 && len(request.Events) == 0 && request.Transition == nil && request.RunTransition == nil {
 		return errors.New("commit must contain items, events, or a state transition")
 	}
 
@@ -304,6 +338,17 @@ func (request CommitRequest) Validate() error {
 			return errors.New("commit transition belongs to another task")
 		}
 	}
+	if request.RunTransition != nil {
+		if err := request.RunTransition.Validate(); err != nil {
+			return err
+		}
+		if request.RunTransition.TaskID != request.TaskID {
+			return errors.New("commit run transition belongs to another task")
+		}
+		if request.Transition != nil && request.Transition.RunID != "" && request.Transition.RunID != request.RunTransition.RunID {
+			return errors.New("task and run transitions refer to different runs")
+		}
+	}
 
 	hasCompletionEvent := false
 	for _, event := range request.Events {
@@ -314,6 +359,9 @@ func (request CommitRequest) Validate() error {
 	transitionCompletes := request.Transition != nil && request.Transition.To == TaskCompleted
 	if hasCompletionEvent != transitionCompletes {
 		return errors.New("task completion event and completed state transition must be committed together")
+	}
+	if transitionCompletes && (request.RunTransition == nil || request.RunTransition.To != RunCompleted) {
+		return errors.New("task and run completion transitions must be committed together")
 	}
 
 	return nil

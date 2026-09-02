@@ -153,12 +153,16 @@ func TestCommitRequestValidateCompletionIsAtomic(t *testing.T) {
 		Transition: &StateTransition{
 			TaskID: "task-1", RunID: "run-1", From: TaskReviewing, To: TaskCompleted,
 		},
+		RunTransition: &RunStateTransition{
+			TaskID: "task-1", RunID: "run-1", From: RunRunning, To: RunCompleted,
+		},
 	}
 	if err := request.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
 
 	request.Transition = nil
+	request.RunTransition = nil
 	if err := request.Validate(); err == nil {
 		t.Fatal("Validate() error = nil for completion event without transition")
 	}
