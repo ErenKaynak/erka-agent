@@ -251,8 +251,20 @@ func (fakeSandbox) Run(ctx context.Context, _ CommandRequest) (CommandResult, er
 
 type fakeStore struct{}
 
+func (fakeStore) CreateProject(ctx context.Context, _ Project) error { return ctx.Err() }
+func (fakeStore) CreateTask(ctx context.Context, _ Task) error       { return ctx.Err() }
+func (fakeStore) CreateRun(ctx context.Context, _ Run) error         { return ctx.Err() }
 func (fakeStore) LoadTask(ctx context.Context, _ TaskID) (TaskSnapshot, error) {
 	return TaskSnapshot{}, ctx.Err()
+}
+func (fakeStore) LoadRun(ctx context.Context, _ RunID) (Run, error) {
+	return Run{}, ctx.Err()
+}
+func (fakeStore) LoadItems(ctx context.Context, _ TaskID, _ uint64) ([]RuntimeItem, error) {
+	return nil, ctx.Err()
+}
+func (fakeStore) LoadEvents(ctx context.Context, _ TaskID, _ uint64) ([]Event, error) {
+	return nil, ctx.Err()
 }
 func (fakeStore) Commit(ctx context.Context, _ CommitRequest) (CommittedBatch, error) {
 	return CommittedBatch{}, ctx.Err()

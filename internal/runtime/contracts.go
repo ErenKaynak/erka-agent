@@ -326,12 +326,22 @@ type TaskSnapshot struct {
 	LastEventSequence uint64
 }
 
-// Store atomically persists items, events, and state transitions. Commit must
-// return only after the entire batch is durable.
+// Store owns durable project, task, run, transcript, event, and state records.
+// Commit must return only after its entire batch is durable.
 type Store interface {
+	CreateProject(context.Context, Project) error
+	CreateTask(context.Context, Task) error
+	CreateRun(context.Context, Run) error
 	LoadTask(context.Context, TaskID) (TaskSnapshot, error)
+	LoadRun(context.Context, RunID) (Run, error)
+	LoadItems(context.Context, TaskID, uint64) ([]RuntimeItem, error)
+	LoadEvents(context.Context, TaskID, uint64) ([]Event, error)
 	Commit(context.Context, CommitRequest) (CommittedBatch, error)
 }
+
+// ValidateCommitRequest exposes the canonical commit validation used by store
+// implementations.
+func ValidateCommitRequest(request CommitRequest) error { return request.Validate() }
 
 // EventSink receives only batches already returned successfully by Store.Commit.
 // Sinks must tolerate retry and deduplicate by event ID.
