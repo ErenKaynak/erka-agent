@@ -246,6 +246,9 @@ type fakeSandbox struct{}
 func (fakeSandbox) ReadFile(ctx context.Context, _ string, _ int64) ([]byte, error) {
 	return nil, ctx.Err()
 }
+func (fakeSandbox) ListDir(ctx context.Context, _ string, _ int) ([]FileEntry, error) {
+	return nil, ctx.Err()
+}
 func (fakeSandbox) WriteFile(ctx context.Context, _ string, _ []byte, _ fs.FileMode) error {
 	return ctx.Err()
 }

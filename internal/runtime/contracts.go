@@ -195,10 +195,19 @@ type CommandResult struct {
 	Duration       time.Duration
 }
 
+type FileEntry struct {
+	Path      string
+	Size      int64
+	Mode      fs.FileMode
+	Directory bool
+	Symlink   bool
+}
+
 // Sandbox is the enforcement boundary for scoped filesystem and process work.
 // WriteFile implementations must replace files atomically.
 type Sandbox interface {
 	ReadFile(context.Context, string, int64) ([]byte, error)
+	ListDir(context.Context, string, int) ([]FileEntry, error)
 	WriteFile(context.Context, string, []byte, fs.FileMode) error
 	Run(context.Context, CommandRequest) (CommandResult, error)
 }
