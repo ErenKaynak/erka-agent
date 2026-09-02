@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ErenKaynak/erka-agent/internal/buildinfo"
+	"github.com/ErenKaynak/erka-agent/internal/config"
 )
 
 var (
@@ -18,6 +19,8 @@ var (
 	ErrRuntimeUnavailable = errors.New("local runtime is not implemented; it arrives in M1")
 )
 
+type configLoader func(context.Context, config.Options) (config.Resolved, error)
+
 // Execute runs the erka command and converts command errors to stable exit codes.
 func Execute(
 	ctx context.Context,
@@ -26,17 +29,28 @@ func Execute(
 	stderr io.Writer,
 	info buildinfo.Info,
 ) int {
-	command := NewRootCommand(info)
+	return execute(ctx, args, stdout, stderr, info, config.Load)
+}
+
+func execute(
+	ctx context.Context,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	info buildinfo.Info,
+	loadConfig configLoader,
+) int {
+	command := newRootCommand(info, loadConfig)
 	command.SetArgs(args)
 	command.SetOut(stdout)
 	command.SetErr(stderr)
 
 	if err := command.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
-		if errors.Is(err, ErrRuntimeUnavailable) {
-			return 1
+		if errors.Is(err, ErrUsage) {
+			return 2
 		}
-		return 2
+		return 1
 	}
 
 	return 0
@@ -44,6 +58,13 @@ func Execute(
 
 // NewRootCommand constructs the public erka command hierarchy.
 func NewRootCommand(info buildinfo.Info) *cobra.Command {
+	return newRootCommand(info, config.Load)
+}
+
+func newRootCommand(info buildinfo.Info, loadConfig configLoader) *cobra.Command {
+	var configPath string
+	var stateDir string
+
 	root := &cobra.Command{
 		Use:           "erka",
 		Short:         "A local-first coding-agent runtime",
@@ -61,9 +82,30 @@ func NewRootCommand(info buildinfo.Info) *cobra.Command {
 	}
 	root.Version = info.Version
 	root.SetVersionTemplate("erka {{.Version}}\n")
+	root.PersistentFlags().StringVar(
+		&configPath,
+		"config",
+		"",
+		"path to the user configuration file (ERKA_CONFIG_PATH)",
+	)
+	root.PersistentFlags().StringVar(
+		&stateDir,
+		"state-dir",
+		"",
+		"path to the local state directory (ERKA_STATE_DIR)",
+	)
 
 	root.AddCommand(newVersionCommand(info))
-	root.AddCommand(newRunCommand())
+	root.AddCommand(newRunCommand(func(ctx context.Context) error {
+		_, err := loadConfig(ctx, config.Options{
+			ConfigPath: configPath,
+			StateDir:   stateDir,
+		})
+		if err != nil {
+			return fmt.Errorf("resolve configuration: %w", err)
+		}
+		return nil
+	}))
 
 	return root
 }
@@ -86,12 +128,15 @@ func newVersionCommand(info buildinfo.Info) *cobra.Command {
 	}
 }
 
-func newRunCommand() *cobra.Command {
+func newRunCommand(loadConfig func(context.Context) error) *cobra.Command {
 	return &cobra.Command{
 		Use:   "run <prompt>",
 		Short: "Run a coding task in the current repository",
 		Args:  exactArgs(1),
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(command *cobra.Command, _ []string) error {
+			if err := loadConfig(command.Context()); err != nil {
+				return err
+			}
 			return ErrRuntimeUnavailable
 		},
 	}
