@@ -36,7 +36,8 @@ func TestRunLocalCompletesFixtureAndPersistsState(t *testing.T) {
 	result, err := RunLocal(context.Background(), LocalOptions{
 		WorkingDirectory: filepath.Join(root, "nested"), StateDir: state,
 		Objective: "fix Add", Provider: provider, Output: &output,
-		IDs: &sequenceIDs{}, Clock: func() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) },
+		AllowFullExecution: true,
+		IDs:                &sequenceIDs{}, Clock: func() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) },
 	})
 	if err != nil {
 		t.Fatalf("RunLocal() error = %v\n%s", err, output.String())

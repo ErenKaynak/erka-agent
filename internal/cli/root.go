@@ -110,14 +110,15 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	root.AddCommand(newVersionCommand(info))
 	root.AddCommand(newRunCommand(func(ctx context.Context, prompt string, resume erkaruntime.TaskID, limits runLimits, output io.Writer) error {
 		resolved, err := loadConfig(ctx, config.Options{
-			ConfigPath:      configPath,
-			StateDir:        stateDir,
-			Provider:        providerName,
-			Model:           model,
-			BaseURL:         baseURL,
-			MaxIterations:   limits.maxIterations,
-			MaxOutputTokens: limits.maxOutputTokens,
-			StageTimeout:    limits.stageTimeout,
+			ConfigPath:         configPath,
+			StateDir:           stateDir,
+			Provider:           providerName,
+			Model:              model,
+			BaseURL:            baseURL,
+			MaxIterations:      limits.maxIterations,
+			MaxOutputTokens:    limits.maxOutputTokens,
+			StageTimeout:       limits.stageTimeout,
+			AllowFullExecution: limits.allowFullExecution,
 		})
 		if err != nil {
 			return fmt.Errorf("resolve configuration: %w", err)
@@ -147,9 +148,10 @@ func newVersionCommand(info buildinfo.Info) *cobra.Command {
 }
 
 type runLimits struct {
-	maxIterations   int
-	maxOutputTokens int64
-	stageTimeout    time.Duration
+	maxIterations      int
+	maxOutputTokens    int64
+	stageTimeout       time.Duration
+	allowFullExecution bool
 }
 
 func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimits, io.Writer) error) *cobra.Command {
@@ -182,6 +184,7 @@ func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimi
 	command.Flags().IntVar(&limits.maxIterations, "max-iterations", 0, "maximum model/tool iterations")
 	command.Flags().Int64Var(&limits.maxOutputTokens, "max-output-tokens", 0, "maximum output tokens per model request")
 	command.Flags().DurationVar(&limits.stageTimeout, "timeout", 0, "overall stage timeout")
+	command.Flags().BoolVar(&limits.allowFullExecution, "full", false, "allow arbitrary commands with the current user's access")
 	return command
 }
 
@@ -201,6 +204,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 	_, err = app.RunLocal(ctx, app.LocalOptions{
 		WorkingDirectory: workingDirectory, StateDir: resolved.StateDir,
 		Objective: objective, ResumeTaskID: resume, Provider: provider, Output: output,
+		AllowFullExecution: resolved.AllowFullExecution,
 		Limits: erkaruntime.NativeLimits{
 			MaxIterations: resolved.MaxIterations, MaxOutputTokens: resolved.MaxOutputTokens,
 			MaxModelOutputBytes: 1 << 20, MaxCumulativeToolOutputBytes: 4 << 20,

@@ -27,14 +27,23 @@ const (
 	maxEntries          = 10_000
 )
 
-// Builtins returns the complete M1 tool set. The returned order is stable so
-// model requests and fixture tests remain deterministic.
-func Builtins(sandbox erkaruntime.Sandbox) []erkaruntime.Tool {
-	return []erkaruntime.Tool{
+type Options struct {
+	// AllowFullExecution enables arbitrary child processes. A working directory
+	// is not OS isolation, so callers must require explicit user consent.
+	AllowFullExecution bool
+}
+
+// Builtins returns the M1 tool set. The returned order is stable so model
+// requests and fixture tests remain deterministic.
+func Builtins(sandbox erkaruntime.Sandbox, options Options) []erkaruntime.Tool {
+	result := []erkaruntime.Tool{
 		&readFileTool{sandbox}, &listFilesTool{sandbox}, &searchTextTool{sandbox},
-		&applyPatchTool{sandbox}, &runCommandTool{sandbox},
-		&gitStatusTool{sandbox}, &gitDiffTool{sandbox},
+		&applyPatchTool{sandbox},
 	}
+	if options.AllowFullExecution {
+		result = append(result, &runCommandTool{sandbox})
+	}
+	return append(result, &gitStatusTool{sandbox}, &gitDiffTool{sandbox})
 }
 
 type readFileTool struct{ sandbox erkaruntime.Sandbox }

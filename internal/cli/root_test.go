@@ -108,13 +108,13 @@ func TestExecuteRunPassesConfigFlagsToLoader(t *testing.T) {
 		"--provider", "deepseek",
 		"--model", "deepseek-v4-pro",
 		"--provider-base-url", "https://deepseek.example",
-		"run", "--max-iterations", "9", "--max-output-tokens", "2048", "--timeout", "2m",
+		"run", "--max-iterations", "9", "--max-output-tokens", "2048", "--timeout", "2m", "--full",
 		"fix the tests",
 	)
 	if code != 0 || stderr != "" {
 		t.Fatalf("Execute() code = %d, stderr = %q", code, stderr)
 	}
-	if got.ConfigPath != "/config.yaml" || got.StateDir != "/state" || got.Provider != "deepseek" || got.Model != "deepseek-v4-pro" || got.BaseURL != "https://deepseek.example" || got.MaxIterations != 9 || got.MaxOutputTokens != 2048 || got.StageTimeout != 2*time.Minute {
+	if got.ConfigPath != "/config.yaml" || got.StateDir != "/state" || got.Provider != "deepseek" || got.Model != "deepseek-v4-pro" || got.BaseURL != "https://deepseek.example" || got.MaxIterations != 9 || got.MaxOutputTokens != 2048 || got.StageTimeout != 2*time.Minute || !got.AllowFullExecution {
 		t.Fatalf("config options = %#v", got)
 	}
 }

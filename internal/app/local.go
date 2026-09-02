@@ -20,15 +20,16 @@ import (
 const nativeInstructions = `You are erka's coding stage. Work only inside the provided repository. Inspect relevant files, make the smallest correct change, run focused validation, inspect the final diff, and finish with a concise summary. Use tools for repository facts; never invent tool results.`
 
 type LocalOptions struct {
-	WorkingDirectory string
-	StateDir         string
-	Objective        string
-	ResumeTaskID     erkaruntime.TaskID
-	Provider         erkaruntime.ModelProvider
-	Output           io.Writer
-	IDs              erkaruntime.IDGenerator
-	Clock            func() time.Time
-	Limits           erkaruntime.NativeLimits
+	WorkingDirectory   string
+	StateDir           string
+	Objective          string
+	ResumeTaskID       erkaruntime.TaskID
+	Provider           erkaruntime.ModelProvider
+	Output             io.Writer
+	IDs                erkaruntime.IDGenerator
+	Clock              func() time.Time
+	Limits             erkaruntime.NativeLimits
+	AllowFullExecution bool
 }
 
 type LocalResult struct {
@@ -85,7 +86,7 @@ func RunLocal(ctx context.Context, options LocalOptions) (LocalResult, error) {
 
 	sink := &writerSink{writer: options.Output}
 	backend := &erkaruntime.NativeBackend{
-		Provider: options.Provider, Tools: tools.Builtins(localSandbox), Sink: sink,
+		Provider: options.Provider, Tools: tools.Builtins(localSandbox, tools.Options{AllowFullExecution: options.AllowFullExecution}), Sink: sink,
 		Instructions: nativeInstructions, Limits: options.Limits, IDs: ids, Clock: clock,
 	}
 	stage, err := backend.RunStage(ctx, erkaruntime.StageRequest{TaskID: task.ID, RunID: run.ID, Objective: task.Objective}, database)

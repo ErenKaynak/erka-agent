@@ -32,7 +32,8 @@ func TestDeepSeekFixtureIntegration(t *testing.T) {
 	defer cancel()
 	result, err := RunLocal(ctx, LocalOptions{
 		WorkingDirectory: root, StateDir: t.TempDir(), Provider: provider,
-		Objective: "Fix the failing Add test with the smallest change. Run go test ./... and inspect the Git diff before finishing.",
+		AllowFullExecution: true,
+		Objective:          "Fix the failing Add test with the smallest change. Run go test ./... and inspect the Git diff before finishing.",
 	})
 	if err != nil {
 		t.Fatal(err)

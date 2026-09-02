@@ -24,7 +24,7 @@ func TestBuiltinDefinitionsAreCompleteAndValid(t *testing.T) {
 		t.Fatal(err)
 	}
 	var names []string
-	for _, tool := range Builtins(local) {
+	for _, tool := range Builtins(local, Options{AllowFullExecution: true}) {
 		definition := tool.Definition()
 		if err := definition.Validate(); err != nil {
 			t.Fatalf("%s definition: %v", definition.Name, err)
@@ -40,6 +40,19 @@ func TestBuiltinDefinitionsAreCompleteAndValid(t *testing.T) {
 	}
 }
 
+func TestBuiltinCommandsRequireExplicitFullExecution(t *testing.T) {
+	t.Parallel()
+	local := mustSandbox(t, t.TempDir())
+	for _, tool := range Builtins(local, Options{}) {
+		if tool.Definition().Name == "run_command" {
+			t.Fatal("run_command was exposed without full execution consent")
+		}
+	}
+	if findTool(t, Builtins(local, Options{AllowFullExecution: true}), "run_command") == nil {
+		t.Fatal("run_command missing with full execution consent")
+	}
+}
+
 func TestFileToolsStayScopedAndProduceDeterministicOutput(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -48,28 +61,28 @@ func TestFileToolsStayScopedAndProduceDeterministicOutput(t *testing.T) {
 	mustWrite(t, filepath.Join(root, ".git", "ignored"), "needle secret\n")
 	local := mustSandbox(t, root)
 
-	read := invoke(t, Builtins(local), "read_file", `{"path":"a.txt"}`)
+	read := invoke(t, Builtins(local, Options{}), "read_file", `{"path":"a.txt"}`)
 	if read.IsError || read.Output != "Alpha\nneedle one\n" {
 		t.Fatalf("read result = %#v", read)
 	}
-	escape := invoke(t, Builtins(local), "read_file", `{"path":"../secret"}`)
+	escape := invoke(t, Builtins(local, Options{}), "read_file", `{"path":"../secret"}`)
 	if !escape.IsError || !strings.Contains(escape.Output, "escapes workspace") {
 		t.Fatalf("escape result = %#v", escape)
 	}
 
-	listed := invoke(t, Builtins(local), "list_files", `{}`)
+	listed := invoke(t, Builtins(local, Options{}), "list_files", `{}`)
 	if listed.IsError || listed.Output != "a.txt\nnested/\nnested/b.txt" {
 		t.Fatalf("list output = %q", listed.Output)
 	}
-	searched := invoke(t, Builtins(local), "search_text", `{"query":"needle"}`)
+	searched := invoke(t, Builtins(local, Options{}), "search_text", `{"query":"needle"}`)
 	if searched.IsError || searched.Output != "a.txt:2:needle one\nnested/b.txt:1:Needle two" {
 		t.Fatalf("search output = %q", searched.Output)
 	}
-	caseSensitive := invoke(t, Builtins(local), "search_text", `{"query":"Needle","case_sensitive":true}`)
+	caseSensitive := invoke(t, Builtins(local, Options{}), "search_text", `{"query":"Needle","case_sensitive":true}`)
 	if caseSensitive.Output != "nested/b.txt:1:Needle two" {
 		t.Fatalf("case-sensitive output = %q", caseSensitive.Output)
 	}
-	unknown := invoke(t, Builtins(local), "read_file", `{"path":"a.txt","surprise":true}`)
+	unknown := invoke(t, Builtins(local, Options{}), "read_file", `{"path":"a.txt","surprise":true}`)
 	if !unknown.IsError || !strings.Contains(unknown.Output, "unknown field") {
 		t.Fatalf("unknown argument result = %#v", unknown)
 	}
@@ -85,7 +98,7 @@ func TestApplyPatchAndGitInspection(t *testing.T) {
 	runGit(t, root, "add", "hello.txt")
 	runGit(t, root, "commit", "-m", "initial")
 	local := mustSandbox(t, root)
-	all := Builtins(local)
+	all := Builtins(local, Options{})
 
 	patch := "diff --git a/hello.txt b/hello.txt\n--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-old\n+new\n"
 	result := invoke(t, all, "apply_patch", string(mustJSON(t, map[string]string{"patch": patch})))
@@ -120,7 +133,7 @@ func TestApplyPatchAndGitInspection(t *testing.T) {
 func TestRunCommandUsesArgumentsWithoutShellAndReportsFailures(t *testing.T) {
 	t.Parallel()
 	local := mustSandbox(t, t.TempDir())
-	all := Builtins(local)
+	all := Builtins(local, Options{AllowFullExecution: true})
 
 	result := invoke(t, all, "run_command", `{"command":["go","version"],"timeout_seconds":10}`)
 	if result.IsError || !strings.Contains(result.Output, "go version") {
@@ -141,7 +154,7 @@ func TestToolCancellationPropagates(t *testing.T) {
 	local := mustSandbox(t, t.TempDir())
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	tool := findTool(t, Builtins(local), "list_files")
+	tool := findTool(t, Builtins(local, Options{}), "list_files")
 	_, err := tool.Execute(ctx, erkaruntime.ToolInvocation{CallID: "call", Arguments: json.RawMessage(`{}`)})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context canceled", err)

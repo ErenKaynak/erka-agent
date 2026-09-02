@@ -47,21 +47,22 @@ type Paths struct {
 
 // Resolved is the effective M0 configuration and the source of each value.
 type Resolved struct {
-	Version          int
-	ConfigPath       string
-	ConfigPathSource Source
-	StateDir         string
-	StateDirSource   Source
-	Provider         string
-	ProviderSource   Source
-	Model            string
-	ModelSource      Source
-	BaseURL          string
-	BaseURLSource    Source
-	APIKeyEnv        string
-	MaxIterations    int
-	MaxOutputTokens  int64
-	StageTimeout     time.Duration
+	Version            int
+	ConfigPath         string
+	ConfigPathSource   Source
+	StateDir           string
+	StateDirSource     Source
+	Provider           string
+	ProviderSource     Source
+	Model              string
+	ModelSource        Source
+	BaseURL            string
+	BaseURLSource      Source
+	APIKeyEnv          string
+	MaxIterations      int
+	MaxOutputTokens    int64
+	StageTimeout       time.Duration
+	AllowFullExecution bool
 }
 
 // Options supplies command flags and injectable operating-system dependencies.
@@ -74,9 +75,10 @@ type Options struct {
 	BaseURL    string
 	APIKeyEnv  string
 
-	MaxIterations   int
-	MaxOutputTokens int64
-	StageTimeout    time.Duration
+	MaxIterations      int
+	MaxOutputTokens    int64
+	StageTimeout       time.Duration
+	AllowFullExecution bool
 
 	GOOS      string
 	HomeDir   string
@@ -98,6 +100,9 @@ type fileConfig struct {
 		MaxOutputTokens int64  `yaml:"max_output_tokens,omitempty"`
 		StageTimeout    string `yaml:"stage_timeout,omitempty"`
 	} `yaml:"runtime,omitempty"`
+	Permissions struct {
+		AllowFullExecution bool `yaml:"allow_full_execution,omitempty"`
+	} `yaml:"permissions,omitempty"`
 }
 
 // Load resolves defaults, a user configuration file, environment variables,
@@ -178,6 +183,7 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 			if parseErr != nil {
 				return Resolved{}, fmt.Errorf("load config %q: parse runtime.stage_timeout: %w", resolved.ConfigPath, parseErr)
 			}
+			resolved.AllowFullExecution = loaded.Permissions.AllowFullExecution
 		}
 	case errors.Is(readErr, fs.ErrNotExist) && !explicitConfig:
 		// A default config file is optional.
@@ -207,6 +213,12 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 			return Resolved{}, fmt.Errorf("parse ERKA_STAGE_TIMEOUT: %w", err)
 		}
 	}
+	if value, ok := nonEmptyEnv(options.LookupEnv, "ERKA_ALLOW_FULL_EXECUTION"); ok {
+		resolved.AllowFullExecution, err = strconv.ParseBool(value)
+		if err != nil {
+			return Resolved{}, fmt.Errorf("parse ERKA_ALLOW_FULL_EXECUTION: %w", err)
+		}
+	}
 	if options.StateDir != "" {
 		resolved.StateDir = options.StateDir
 		resolved.StateDirSource = SourceFlag
@@ -231,6 +243,9 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 	}
 	if options.StageTimeout != 0 {
 		resolved.StageTimeout = options.StageTimeout
+	}
+	if options.AllowFullExecution {
+		resolved.AllowFullExecution = true
 	}
 
 	if !isPlatformAbs(options.GOOS, resolved.StateDir) {

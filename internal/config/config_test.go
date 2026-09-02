@@ -182,6 +182,8 @@ runtime:
   max_iterations: 4
   max_output_tokens: 1000
   stage_timeout: 1m
+permissions:
+  allow_full_execution: false
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -192,12 +194,13 @@ runtime:
 		LookupEnv: lookup(map[string]string{
 			"ERKA_MODEL": "env-model", "ERKA_DEEPSEEK_BASE_URL": "https://env.example",
 			"ERKA_API_KEY_ENV": "ENV_KEY", "ERKA_MAX_OUTPUT_TOKENS": "2000", "ERKA_STAGE_TIMEOUT": "2m",
+			"ERKA_ALLOW_FULL_EXECUTION": "true",
 		}),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Model != "flag-model" || got.ModelSource != SourceFlag || got.BaseURL != "https://env.example" || got.BaseURLSource != SourceEnvironment || got.APIKeyEnv != "ENV_KEY" || got.MaxIterations != 8 || got.MaxOutputTokens != 2000 || got.StageTimeout != 2*time.Minute {
+	if got.Model != "flag-model" || got.ModelSource != SourceFlag || got.BaseURL != "https://env.example" || got.BaseURLSource != SourceEnvironment || got.APIKeyEnv != "ENV_KEY" || got.MaxIterations != 8 || got.MaxOutputTokens != 2000 || got.StageTimeout != 2*time.Minute || !got.AllowFullExecution {
 		t.Fatalf("resolved = %#v", got)
 	}
 }
