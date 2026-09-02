@@ -1,0 +1,28 @@
+# Local project guidance and scope documents
+/AGENTS.md
+/docs/
+
+# Local erka state (project configuration may remain trackable)
+/.erka/state/
+/.erka/cache/
+/.erka/*.db
+/.erka/*.db-*
+
+# Build and test artifacts
+/erka
+/dist/
+/coverage/
+*.coverprofile
+*.test
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# Editor and operating-system artifacts
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
