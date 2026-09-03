@@ -65,6 +65,12 @@ func TestCanFallbackIsDeterministicAndMutationSafe(t *testing.T) {
 	if CanFallback(&AttemptError{Kind: FailureRateLimit, AfterMutation: true, Err: errors.New("busy")}) {
 		t.Fatal("post-mutation failure permitted fallback")
 	}
+	if !CanFallback(&erkaruntime.StageError{Cause: &erkaruntime.ProviderError{Code: "http_503", Message: "busy", Retryable: true}}) {
+		t.Fatal("retryable provider failure before mutation should permit fallback")
+	}
+	if CanFallback(&erkaruntime.StageError{Cause: &erkaruntime.ProviderError{Code: "http_503", Message: "busy", Retryable: true}, AfterMutation: true}) {
+		t.Fatal("retryable provider failure after a tool mutation permitted fallback")
+	}
 	if CanFallback(&AttemptError{Kind: FailureAuth, Err: errors.New("bad key")}) {
 		t.Fatal("auth failure permitted fallback")
 	}

@@ -117,12 +117,14 @@ func TestPipelineRepairsFailedValidationAndRevalidates(t *testing.T) {
 	pipeline.MaxRepairAttempts = 1
 	pipeline.Stages["validation"] = config.StageRoute{Candidates: []string{"coder/check"}}
 	pipeline.Stages["repair"] = config.StageRoute{Candidates: []string{"coder/c"}}
+	pipeline.Stages["review"] = config.StageRoute{Candidates: []string{"planner/review"}}
 	resolved.Pipelines["default"] = pipeline
 	responses := map[Stage][][]erkaruntime.ModelOutput{
 		StagePlanning:   {{{Kind: erkaruntime.ModelTextDelta, Text: "Plan."}, {Kind: erkaruntime.ModelCompleted}}},
 		StageCoding:     {{{Kind: erkaruntime.ModelTextDelta, Text: "Code."}, {Kind: erkaruntime.ModelCompleted}}},
 		StageValidation: {{{Kind: erkaruntime.ModelTextDelta, Text: "FAIL tests"}, {Kind: erkaruntime.ModelCompleted}}, {{Kind: erkaruntime.ModelTextDelta, Text: "PASS tests"}, {Kind: erkaruntime.ModelCompleted}}},
 		StageRepair:     {{{Kind: erkaruntime.ModelTextDelta, Text: "Repair."}, {Kind: erkaruntime.ModelCompleted}}},
+		StageReview:     {{{Kind: erkaruntime.ModelTextDelta, Text: "Review passed."}, {Kind: erkaruntime.ModelCompleted}}},
 	}
 	providers := make(map[Stage]*pipelineProvider)
 	engine := testPipelineEngine(memory, ids, now, resolved, func(_ context.Context, _ Candidate, stage Stage, limits erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error) {
@@ -137,8 +139,12 @@ func TestPipelineRepairsFailedValidationAndRevalidates(t *testing.T) {
 	if err != nil || result.Status != erkaruntime.TaskCompleted {
 		t.Fatalf("Run() = %#v, %v", result, err)
 	}
-	if len(providers[StageValidation].Requests()) != 2 || len(providers[StageRepair].Requests()) != 1 {
-		t.Fatalf("validation=%d repair=%d", len(providers[StageValidation].Requests()), len(providers[StageRepair].Requests()))
+	if len(providers[StageValidation].Requests()) != 2 || len(providers[StageRepair].Requests()) != 1 || len(providers[StageReview].Requests()) != 1 {
+		t.Fatalf("validation=%d repair=%d review=%d", len(providers[StageValidation].Requests()), len(providers[StageRepair].Requests()), len(providers[StageReview].Requests()))
+	}
+	reviewRun, err := memory.LoadRun(context.Background(), result.RunID)
+	if err != nil || reviewRun.Stage != "review" || reviewRun.Status != erkaruntime.RunCompleted {
+		t.Fatalf("review run = %#v, %v", reviewRun, err)
 	}
 	items, _ := memory.LoadItems(context.Background(), "task-1", 0)
 	validationAttempts := make(map[erkaruntime.RunID]bool)
