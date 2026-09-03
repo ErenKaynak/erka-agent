@@ -12,10 +12,10 @@ go build -o erka ./cmd/erka
 ./erka
 ```
 
-On first launch, erka asks for the DeepSeek API key in a masked terminal field
-and saves it in the operating-system credential store. If the credential store
-is unavailable, the key remains in memory for that process only. Environment
-credentials take precedence:
+On first launch, erka asks for the selected provider credentials in masked
+terminal fields and saves them in the operating-system credential store. If the
+credential store is unavailable, a key remains in memory for that process only.
+Environment credentials always take precedence:
 
 ```bash
 export ERKA_DEEPSEEK_API_KEY='your-key'
@@ -62,7 +62,8 @@ is left in a waiting state for inspection rather than being silently replayed.
 
 Configuration is optional and strictly parsed as versioned YAML. Command flags
 override environment variables, which override the configuration file and then
-the built-in defaults. A minimal configuration is:
+the built-in defaults. This minimal configuration runs one DeepSeek coding
+stage:
 
 ```yaml
 version: 1
@@ -83,6 +84,85 @@ platform-standard locations. The default native endpoint is
 endpoints. Secrets do not belong in YAML—`ERKA_DEEPSEEK_API_KEY` is read by the
 trusted provider adapter and excluded from tool subprocess environments.
 
+### Fixed multi-model pipelines
+
+M2 can assign different native connections and models to planning, coding,
+validation, repair, and review. Routes are fixed and deterministic: erka tries
+each stage's candidates in the listed order and only falls back after a
+retryable failure that happened before any mutating tool ran.
+
+```yaml
+version: 1
+pipeline: default
+
+connections:
+  planner:
+    provider: openai
+    api_key_env: OPENAI_API_KEY
+    models:
+      gpt-model-id:
+        capabilities: [tools, structured_output]
+        context_tokens: 128000
+  coder:
+    provider: deepseek
+    api_key_env: ERKA_DEEPSEEK_API_KEY
+
+pipelines:
+  default:
+    routing: fixed
+    max_repair_attempts: 1
+    stages:
+      planning:
+        candidates: [planner/gpt-model-id]
+        required_capabilities: [structured_output]
+        budget:
+          max_input_tokens: 20000
+          max_output_tokens: 4000
+          max_iterations: 3
+          timeout: 5m
+      coding:
+        candidates: [coder/deepseek-v4-flash]
+      validation:
+        candidates: [coder/deepseek-v4-flash]
+      repair:
+        candidates: [coder/deepseek-v4-flash]
+      review:
+        candidates: [planner/gpt-model-id]
+
+permissions:
+  allow_full_execution: false
+```
+
+Replace `gpt-model-id` with an OpenAI model available to your API account, set
+both environment variables, then launch either interface:
+
+```bash
+./erka --pipeline default
+./erka --pipeline default run --full "Fix the failing checkout tests"
+```
+
+The `pipeline` field selects a configured pipeline; `--pipeline` and
+`ERKA_PIPELINE` override it. Planning, validation, and review receive read-only
+tools. Coding and repair may use workspace mutations, while arbitrary process
+execution still requires `--full` or an in-TUI confirmation. Each stage stores
+its own run, checkpoint, token usage, configured cost, and terminal status in
+SQLite. Model-to-model handoff uses bounded durable checkpoints instead of
+replaying another provider's full transcript.
+
+Optional model pricing uses integer microunits per million tokens:
+
+```yaml
+models:
+  gpt-model-id:
+    input_cost_per_million_microunits: 1000000
+    output_cost_per_million_microunits: 2000000
+    currency: USD
+```
+
+Cost limits can then be set with `max_cost_microunits` and `currency` inside a
+stage budget. These values are configuration supplied by the operator; erka
+does not fetch changing prices from a provider.
+
 ## Product promise
 
 - Run without a server on macOS, Linux, or Windows.
@@ -94,14 +174,12 @@ trusted provider adapter and excluded from tool subprocess environments.
 
 ## Runtime model
 
-Native providers use the `erka` tool loop end to end. Subscription integrations
-are explicit compatibility bridges and are never represented as native model
-APIs. Local commands use the same application and runtime core as optional server
-mode, but do not require a daemon or hidden HTTP server.
-
-The initial native provider target is DeepSeek. Planned optional integrations
-include a native OpenAI API connection and clearly labeled Codex and OpenCode
-subscription bridges.
+Native DeepSeek and OpenAI API connections use the `erka` tool loop end to end.
+OpenAI uses the Responses streaming API; DeepSeek uses its streaming chat API.
+Subscription integrations are explicit compatibility bridges and are never
+represented as native model APIs. Local commands use the same application and
+runtime core as optional server mode, but do not require a daemon or hidden HTTP
+server.
 
 ## Roadmap
 
@@ -121,14 +199,17 @@ multi-user SaaS, distributed workers, or automatic deployment.
 
 ## Current status
 
-M0, M1, and the M1.5 interactive terminal milestone are implemented. Bare
-`erka` opens a local keyboard-first conversation UI with live model output,
-durable follow-up queues, conversation restore, activity and diff views,
-session-only permission elevation, cancellation, and explicit interrupted-write
-recovery. `erka run` uses the same application/runtime core. DeepSeek streaming,
-SQLite state, and seven bounded coding tools remain the initial native vertical
-slice. The standard suite includes a headless two-turn TUI fixture and makes no
-network requests; a live DeepSeek fixture is opt-in.
+M0, M1, M1.5, and M2 are implemented. Bare `erka` opens a local keyboard-first
+conversation UI with live model output, durable follow-up queues, conversation
+restore, activity and diff views, session-only permission elevation,
+cancellation, and explicit interrupted-write recovery. `erka run` uses the same
+application/runtime core.
+
+Configured fixed pipelines now run planning, coding, validation, bounded repair,
+and review through native DeepSeek and OpenAI connections. Stage checkpoints,
+fallback attempts, token/cost accounting, and restart state are durable. The
+standard suite includes headless TUI and two-provider protocol fixtures and
+makes no network requests; a live DeepSeek fixture remains opt-in.
 
 The server/API is planned for M4, and browser access is planned for M5. No web
 UI or background daemon is included today.
