@@ -229,7 +229,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 		return fmt.Errorf("DeepSeek credential is missing: set %s or launch interactive erka", resolved.APIKeyEnv)
 	}
 	if err != nil {
-		return fmt.Errorf("resolve DeepSeek credential: %w", err)
+		return fmt.Errorf("DeepSeek credential is missing: set %s or launch interactive erka (OS keyring unavailable: %w)", resolved.APIKeyEnv, err)
 	}
 	provider, err := deepseek.New(deepseek.Options{APIKey: key, BaseURL: resolved.BaseURL, Model: resolved.Model})
 	if err != nil {
