@@ -252,10 +252,10 @@ var ErrInvalidTransition = errors.New("invalid task state transition")
 var ErrInvalidRunTransition = errors.New("invalid run state transition")
 
 var allowedTransitions = map[TaskStatus]map[TaskStatus]bool{
-	TaskQueued:          {TaskPreparing: true, TaskCancelled: true},
+	TaskQueued:          {TaskPreparing: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskPreparing:       {TaskPlanning: true, TaskCoding: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskPlanning:        {TaskCoding: true, TaskWaitingApproval: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
-	TaskCoding:          {TaskValidating: true, TaskWaiting: true, TaskWaitingApproval: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
+	TaskCoding:          {TaskValidating: true, TaskReviewing: true, TaskCompleted: true, TaskWaiting: true, TaskWaitingApproval: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskValidating:      {TaskCoding: true, TaskReviewing: true, TaskCompleted: true, TaskWaiting: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskReviewing:       {TaskCompleted: true, TaskCoding: true, TaskWaiting: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskWaiting:         {TaskCoding: true, TaskValidating: true, TaskReviewing: true, TaskCancelled: true, TaskTimedOut: true},
@@ -373,8 +373,11 @@ func (request CommitRequest) Validate() error {
 	if hasCompletionEvent != transitionCompletes {
 		return errors.New("task completion event and completed state transition must be committed together")
 	}
-	if transitionCompletes && (request.RunTransition == nil || request.RunTransition.To != RunCompleted) {
-		return errors.New("task and run completion transitions must be committed together")
+	if transitionCompletes && request.RunTransition != nil && request.RunTransition.To != RunCompleted {
+		return errors.New("task completion cannot leave its final run incomplete")
+	}
+	if transitionCompletes && request.Transition.RunID == "" {
+		return errors.New("task completion requires a final run ID")
 	}
 
 	return nil
@@ -411,15 +414,20 @@ type EventSink interface {
 }
 
 type StageRequest struct {
-	TaskID     TaskID
-	RunID      RunID
-	Objective  string
-	Checkpoint *Checkpoint
+	TaskID          TaskID
+	RunID           RunID
+	Objective       string
+	Checkpoint      *Checkpoint
+	Stage           Stage
+	ContextMaxBytes int64
 }
 
 type StageResult struct {
 	Checkpoint Checkpoint
 	Status     TaskStatus
+	Usage      Usage
+	Iterations int
+	Mutated    bool
 }
 
 // ExecutionBackend runs one stage and records durable progress through Store.

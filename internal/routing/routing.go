@@ -251,6 +251,13 @@ func CanFallback(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
+	var stageFailure *erkaruntime.StageError
+	if errors.As(err, &stageFailure) {
+		if stageFailure.AfterMutation {
+			return false
+		}
+		err = stageFailure.Cause
+	}
 	var failure *AttemptError
 	if !errors.As(err, &failure) || failure.AfterMutation {
 		return false

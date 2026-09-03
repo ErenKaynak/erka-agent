@@ -105,7 +105,7 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 	if err != nil {
 		return StageResult{}, err
 	}
-	if err := appender.start(ctx, request.Objective); err != nil {
+	if err := appender.start(ctx, request.Objective, request.Stage); err != nil {
 		return StageResult{}, err
 	}
 
@@ -122,13 +122,27 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 	}
 
 	definitions := prepared.definitions()
+	var cumulativeUsage Usage
+	mutated := false
 	for iteration := 1; iteration <= prepared.Limits.MaxIterations; iteration++ {
 		if err := ctx.Err(); err != nil {
 			return StageResult{}, err
 		}
+		instructions, modelItems := prepared.Instructions, history
+		if request.Stage != "" {
+			runs, loadErr := loadContextRuns(ctx, store, request.RunID, history)
+			if loadErr != nil {
+				return StageResult{}, prepared.fail(ctx, appender, "context_runs_failed", loadErr)
+			}
+			packet, compileErr := CompileStageContext(ContextRequest{Stage: request.Stage, TaskID: request.TaskID, RunID: request.RunID, Items: history, Runs: runs, MaxBytes: request.ContextMaxBytes})
+			if compileErr != nil {
+				return StageResult{}, prepared.fail(ctx, appender, "context_compile_failed", compileErr)
+			}
+			instructions, modelItems = packet.Instructions, packet.Items
+		}
 		modelRequest := ModelRequest{
-			Instructions:    prepared.Instructions,
-			Items:           history,
+			Instructions:    instructions,
+			Items:           modelItems,
 			Tools:           definitions,
 			MaxOutputTokens: prepared.Limits.MaxOutputTokens,
 		}
@@ -141,6 +155,9 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 				return StageResult{}, err
 			}
 			return StageResult{}, prepared.fail(ctx, appender, "model_stream_failed", err)
+		}
+		if response.usage != nil {
+			addUsage(&cumulativeUsage, *response.usage)
 		}
 
 		items, calls, err := prepared.responseItems(request, response)
@@ -161,11 +178,15 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 				err := fmt.Errorf("%w: completed response has no text or tool call", ErrMalformedStream)
 				return StageResult{}, prepared.fail(ctx, appender, "empty_model_response", err)
 			}
-			return prepared.complete(ctx, appender, request, response.text)
+			return prepared.complete(ctx, appender, request, response.text, cumulativeUsage, iteration, mutated)
 		}
 
 		for _, call := range calls {
 			prepared.observe(ctx, LiveUpdate{TaskID: request.TaskID, RunID: request.RunID, Kind: LiveToolStarted, Tool: call.Tool, CallID: call.CallID})
+			if call.Mutating {
+				mutated = true
+				appender.mutated = true
+			}
 			result, executeErr := prepared.executeTool(ctx, call, toolOutputBytes)
 			if executeErr != nil {
 				if errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded) {
@@ -209,7 +230,31 @@ func (request StageRequest) validate() error {
 	if strings.TrimSpace(request.Objective) == "" {
 		return errors.New("stage request requires an objective")
 	}
+	if request.ContextMaxBytes < 0 {
+		return errors.New("stage context byte limit must not be negative")
+	}
+	if request.Stage != "" {
+		if _, err := StageInstructions(request.Stage); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func loadContextRuns(ctx context.Context, store Store, current RunID, items []RuntimeItem) ([]Run, error) {
+	ids := map[RunID]bool{current: true}
+	for _, item := range items {
+		ids[item.RunID] = true
+	}
+	runs := make([]Run, 0, len(ids))
+	for id := range ids {
+		run, err := store.LoadRun(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, nil
 }
 
 type preparedBackend struct {
@@ -520,7 +565,21 @@ func (backend *preparedBackend) recoverPending(ctx context.Context, appender *du
 	return history, consumed, nil
 }
 
-func (backend *preparedBackend) complete(ctx context.Context, appender *durableAppender, request StageRequest, finalText string) (StageResult, error) {
+func (backend *preparedBackend) complete(ctx context.Context, appender *durableAppender, request StageRequest, finalText string, usage Usage, iterations int, mutated bool) (StageResult, error) {
+	if request.Stage != "" {
+		checkpoint, err := NewStageCheckpoint(request.Stage, request.Objective, finalText)
+		if err != nil {
+			return StageResult{}, backend.fail(ctx, appender, "invalid_checkpoint", err)
+		}
+		item := RuntimeItem{Kind: ItemCheckpoint, Checkpoint: &checkpoint}
+		if _, err := appender.append(ctx, []RuntimeItem{item}, []pendingEvent{{
+			Type: "stage.output", Message: fmt.Sprintf("%s stage produced a durable checkpoint", request.Stage),
+			Data: eventData(map[string]any{"stage": request.Stage}),
+		}}); err != nil {
+			return StageResult{}, err
+		}
+		return StageResult{Checkpoint: checkpoint, Status: appender.snapshot.Status, Usage: usage, Iterations: iterations, Mutated: mutated}, nil
+	}
 	if err := appender.transition(ctx, TaskValidating, []pendingEvent{{
 		Type: "task.validating", Message: "Finalizing durable task state",
 	}}); err != nil {
@@ -536,7 +595,7 @@ func (backend *preparedBackend) complete(ctx context.Context, appender *durableA
 	}}, TaskCompleted); err != nil {
 		return StageResult{}, err
 	}
-	return StageResult{Checkpoint: checkpoint, Status: TaskCompleted}, nil
+	return StageResult{Checkpoint: checkpoint, Status: TaskCompleted, Usage: usage, Iterations: iterations, Mutated: mutated}, nil
 }
 
 func (backend *preparedBackend) fail(ctx context.Context, appender *durableAppender, code string, cause error) error {
@@ -544,6 +603,12 @@ func (backend *preparedBackend) fail(ctx context.Context, appender *durableAppen
 		return cause
 	}
 	item := RuntimeItem{Kind: ItemError, Error: &RuntimeError{Code: code, Message: cause.Error()}}
+	if appender.pipeline {
+		_, commitErr := appender.appendRunTransition(ctx, []RuntimeItem{item}, []pendingEvent{{
+			Type: "stage.failed", Message: "Pipeline stage failed", Data: eventData(map[string]any{"code": code}),
+		}}, RunFailed)
+		return errors.Join(&StageError{Cause: cause, AfterMutation: appender.mutated}, commitErr)
+	}
 	_, commitErr := appender.appendTransition(ctx, []RuntimeItem{item}, []pendingEvent{{
 		Type: "task.failed", Message: "Task failed", Data: eventData(map[string]any{"code": code}),
 	}}, TaskFailed)
@@ -582,6 +647,8 @@ type durableAppender struct {
 	runID     RunID
 	snapshot  TaskSnapshot
 	runStatus RunStatus
+	pipeline  bool
+	mutated   bool
 }
 
 func newDurableAppender(ctx context.Context, request StageRequest, store Store, sink EventSink, ids IDGenerator, clock func() time.Time) (*durableAppender, error) {
@@ -599,11 +666,14 @@ func newDurableAppender(ctx context.Context, request StageRequest, store Store, 
 	return &durableAppender{
 		store: store, sink: sink, ids: ids, clock: clock,
 		taskID: request.TaskID, runID: request.RunID, snapshot: snapshot,
-		runStatus: run.Status,
+		runStatus: run.Status, pipeline: request.Stage != "",
 	}, nil
 }
 
-func (appender *durableAppender) start(ctx context.Context, objective string) error {
+func (appender *durableAppender) start(ctx context.Context, objective string, stage Stage) error {
+	if stage != "" {
+		return appender.startPipeline(ctx, objective, stage)
+	}
 	switch appender.snapshot.Status {
 	case TaskCompleted, TaskFailed, TaskCancelled, TaskTimedOut:
 		if err := appender.transition(ctx, TaskPreparing, []pendingEvent{{
@@ -634,8 +704,41 @@ func (appender *durableAppender) start(ctx context.Context, objective string) er
 	}
 }
 
+func (appender *durableAppender) startPipeline(ctx context.Context, objective string, stage Stage) error {
+	target := taskStatusForStage(stage)
+	if target == "" {
+		return fmt.Errorf("unknown pipeline stage %q", stage)
+	}
+	switch appender.snapshot.Status {
+	case TaskCompleted, TaskFailed, TaskCancelled, TaskTimedOut:
+		if err := appender.transition(ctx, TaskPreparing, []pendingEvent{{Type: "task.started", Message: "Follow-up turn started"}}); err != nil {
+			return err
+		}
+	case TaskQueued:
+		if err := appender.transition(ctx, TaskPreparing, []pendingEvent{{Type: "task.started", Message: "Task started"}}); err != nil {
+			return err
+		}
+	}
+	if appender.snapshot.Status == target {
+		if appender.runStatus == RunQueued {
+			_, err := appender.appendRunTransition(ctx, nil, []pendingEvent{{Type: "stage.started", Message: fmt.Sprintf("%s stage started", stage), Data: eventData(map[string]any{"stage": stage})}}, RunRunning)
+			return err
+		}
+		if appender.runStatus == RunRunning {
+			return nil
+		}
+		return fmt.Errorf("run %q cannot start from status %q", appender.runID, appender.runStatus)
+	}
+	items := []RuntimeItem(nil)
+	if appender.snapshot.Status == TaskPreparing {
+		items = []RuntimeItem{{Kind: ItemUserMessage, Message: &Message{Content: objective}}}
+	}
+	_, err := appender.appendTransition(ctx, items, []pendingEvent{{Type: "stage.started", Message: fmt.Sprintf("%s stage started", stage), Data: eventData(map[string]any{"stage": stage})}}, target)
+	return err
+}
+
 func (appender *durableAppender) append(ctx context.Context, items []RuntimeItem, events []pendingEvent) ([]RuntimeItem, error) {
-	return appender.appendTransition(ctx, items, events, "")
+	return appender.appendState(ctx, items, events, "", "")
 }
 
 func (appender *durableAppender) transition(ctx context.Context, to TaskStatus, events []pendingEvent) error {
@@ -644,6 +747,14 @@ func (appender *durableAppender) transition(ctx context.Context, to TaskStatus, 
 }
 
 func (appender *durableAppender) appendTransition(ctx context.Context, items []RuntimeItem, pendingEvents []pendingEvent, to TaskStatus) ([]RuntimeItem, error) {
+	return appender.appendState(ctx, items, pendingEvents, to, "")
+}
+
+func (appender *durableAppender) appendRunTransition(ctx context.Context, items []RuntimeItem, pendingEvents []pendingEvent, to RunStatus) ([]RuntimeItem, error) {
+	return appender.appendState(ctx, items, pendingEvents, "", to)
+}
+
+func (appender *durableAppender) appendState(ctx context.Context, items []RuntimeItem, pendingEvents []pendingEvent, to TaskStatus, explicitRunTo RunStatus) ([]RuntimeItem, error) {
 	now := appender.clock().UTC()
 	committedItems := make([]RuntimeItem, len(items))
 	for index, item := range items {
@@ -688,6 +799,9 @@ func (appender *durableAppender) appendTransition(ctx context.Context, items []R
 			}
 		}
 	}
+	if explicitRunTo != "" && explicitRunTo != appender.runStatus {
+		request.RunTransition = &RunStateTransition{TaskID: appender.taskID, RunID: appender.runID, From: appender.runStatus, To: explicitRunTo}
+	}
 	batch, err := appender.store.Commit(ctx, request)
 	if err != nil {
 		return nil, err
@@ -696,9 +810,9 @@ func (appender *durableAppender) appendTransition(ctx context.Context, items []R
 	appender.snapshot.LastEventSequence = batch.LastEventSequence
 	if to != "" {
 		appender.snapshot.Status = to
-		if request.RunTransition != nil {
-			appender.runStatus = request.RunTransition.To
-		}
+	}
+	if request.RunTransition != nil {
+		appender.runStatus = request.RunTransition.To
 	}
 	if appender.sink != nil && len(batch.Events) > 0 {
 		if err := appender.sink.Publish(ctx, batch); err != nil {
@@ -710,7 +824,7 @@ func (appender *durableAppender) appendTransition(ctx context.Context, items []R
 
 func runStatusForTaskStatus(status TaskStatus) RunStatus {
 	switch status {
-	case TaskCoding:
+	case TaskPlanning, TaskCoding, TaskValidating, TaskReviewing:
 		return RunRunning
 	case TaskWaiting:
 		return RunWaiting
@@ -725,6 +839,40 @@ func runStatusForTaskStatus(status TaskStatus) RunStatus {
 	default:
 		return ""
 	}
+}
+
+func taskStatusForStage(stage Stage) TaskStatus {
+	switch stage {
+	case StagePlanning:
+		return TaskPlanning
+	case StageCoding, StageRepair:
+		return TaskCoding
+	case StageValidation:
+		return TaskValidating
+	case StageReview:
+		return TaskReviewing
+	default:
+		return ""
+	}
+}
+
+type StageError struct {
+	Cause         error
+	AfterMutation bool
+}
+
+func (failure *StageError) Error() string {
+	if failure == nil || failure.Cause == nil {
+		return "pipeline stage failed"
+	}
+	return failure.Cause.Error()
+}
+
+func (failure *StageError) Unwrap() error {
+	if failure == nil {
+		return nil
+	}
+	return failure.Cause
 }
 
 func eventData(value map[string]any) json.RawMessage {

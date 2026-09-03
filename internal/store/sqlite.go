@@ -372,6 +372,15 @@ func (store *SQLite) Commit(ctx context.Context, request erkaruntime.CommitReque
 			return batch, fmt.Errorf("run %q status changed: %w", request.RunTransition.RunID, erkaruntime.ErrConflict)
 		}
 	}
+	if request.Transition != nil && request.Transition.To == erkaruntime.TaskCompleted && request.RunTransition == nil {
+		var status string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = ?`, request.Transition.RunID).Scan(&status); err != nil {
+			return batch, fmt.Errorf("load final run %q status: %w", request.Transition.RunID, err)
+		}
+		if erkaruntime.RunStatus(status) != erkaruntime.RunCompleted {
+			return batch, errors.New("task completion requires an already completed final run")
+		}
+	}
 	if err := insertItemsTx(ctx, tx, request.Items); err != nil {
 		return batch, err
 	}

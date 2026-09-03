@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -188,6 +189,11 @@ func (memory *Memory) Commit(ctx context.Context, request erkaruntime.CommitRequ
 		run := memory.runs[request.RunTransition.RunID]
 		if run.Status != request.RunTransition.From {
 			return erkaruntime.CommittedBatch{}, fmt.Errorf("run %q status changed: %w", run.ID, erkaruntime.ErrConflict)
+		}
+	}
+	if request.Transition != nil && request.Transition.To == erkaruntime.TaskCompleted && request.RunTransition == nil {
+		if memory.runs[request.Transition.RunID].Status != erkaruntime.RunCompleted {
+			return erkaruntime.CommittedBatch{}, errors.New("task completion requires an already completed final run")
 		}
 	}
 

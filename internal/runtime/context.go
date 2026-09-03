@@ -139,7 +139,7 @@ func StageInstructions(stage Stage) (string, error) {
 	case StageCoding:
 		return "You are erka's coding stage. Follow the durable approved plan, make the smallest correct workspace change, inspect the diff, and summarize the implementation. Never claim validation you did not run.", nil
 	case StageValidation:
-		return "You are erka's validation stage. Inspect the request, approved plan, current diff, and available test evidence. Run allowed validation tools when available and report concrete successes or failures without changing product code.", nil
+		return "You are erka's validation stage. Inspect the request, approved plan, current diff, and available test evidence. Run allowed validation tools when available and report concrete successes or failures without changing product code. Begin the final response with PASS or FAIL.", nil
 	case StageRepair:
 		return "You are erka's repair stage. Use the approved plan and latest validation failures, make only the changes required to repair them, then summarize what changed for revalidation.", nil
 	case StageReview:
