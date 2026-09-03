@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/ErenKaynak/erka-agent/internal/app"
 	"github.com/ErenKaynak/erka-agent/internal/auth"
@@ -17,6 +18,7 @@ import (
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	"github.com/ErenKaynak/erka-agent/internal/providers/deepseek"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
+	"github.com/ErenKaynak/erka-agent/internal/tui"
 )
 
 var (
@@ -25,7 +27,14 @@ var (
 )
 
 type configLoader func(context.Context, config.Options) (config.Resolved, error)
-type taskRunner func(context.Context, config.Resolved, string, erkaruntime.TaskID, io.Writer) error
+type taskRunner func(context.Context, config.Resolved, string, erkaruntime.TaskID, string, io.Writer) error
+type tuiRunner func(context.Context, config.Resolved, tuiLaunchOptions, io.Reader, io.Writer) error
+
+type tuiLaunchOptions struct {
+	WorkingDirectory string
+	TaskID           erkaruntime.TaskID
+	Full             bool
+}
 
 // Execute runs the erka command and converts command errors to stable exit codes.
 func Execute(
@@ -35,7 +44,8 @@ func Execute(
 	stderr io.Writer,
 	info buildinfo.Info,
 ) int {
-	return execute(ctx, args, stdout, stderr, info, config.Load, runConfigured)
+	interactive := terminalReader(os.Stdin) && terminalWriter(stdout)
+	return executeWithTUI(ctx, args, os.Stdin, stdout, stderr, info, config.Load, runConfigured, launchConfigured, interactive)
 }
 
 func execute(
@@ -47,7 +57,11 @@ func execute(
 	loadConfig configLoader,
 	runTask taskRunner,
 ) int {
-	command := newRootCommand(info, loadConfig, runTask)
+	return executeWithTUI(ctx, args, nil, stdout, stderr, info, loadConfig, runTask, nil, false)
+}
+
+func executeWithTUI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, info buildinfo.Info, loadConfig configLoader, runTask taskRunner, launch tuiRunner, interactive bool) int {
+	command := newRootCommand(info, loadConfig, runTask, launch, interactive, stdin)
 	command.SetArgs(args)
 	command.SetOut(stdout)
 	command.SetErr(stderr)
@@ -65,15 +79,18 @@ func execute(
 
 // NewRootCommand constructs the public erka command hierarchy.
 func NewRootCommand(info buildinfo.Info) *cobra.Command {
-	return newRootCommand(info, config.Load, runConfigured)
+	return newRootCommand(info, config.Load, runConfigured, launchConfigured, false, nil)
 }
 
-func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRunner) *cobra.Command {
+func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRunner, launch tuiRunner, interactive bool, stdin io.Reader) *cobra.Command {
 	var configPath string
 	var stateDir string
 	var providerName string
 	var model string
 	var baseURL string
+	var workingDirectory string
+	var taskID string
+	var allowFullExecution bool
 
 	root := &cobra.Command{
 		Use:           "erka",
@@ -87,6 +104,13 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 			return nil
 		},
 		RunE: func(command *cobra.Command, _ []string) error {
+			if interactive && launch != nil {
+				resolved, err := loadConfig(command.Context(), config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, AllowFullExecution: allowFullExecution})
+				if err != nil {
+					return fmt.Errorf("resolve configuration: %w", err)
+				}
+				return launch(command.Context(), resolved, tuiLaunchOptions{WorkingDirectory: workingDirectory, TaskID: erkaruntime.TaskID(taskID), Full: resolved.AllowFullExecution}, stdin, command.OutOrStdout())
+			}
 			return command.Help()
 		},
 	}
@@ -98,6 +122,9 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 		"",
 		"path to the user configuration file (ERKA_CONFIG_PATH)",
 	)
+	root.PersistentFlags().StringVar(&workingDirectory, "cwd", "", "repository working directory")
+	root.PersistentFlags().StringVar(&taskID, "task", "", "open a conversation by task ID")
+	root.PersistentFlags().BoolVar(&allowFullExecution, "full", false, "allow arbitrary commands for this process")
 	root.PersistentFlags().StringVar(&providerName, "provider", "", "native provider name (ERKA_PROVIDER)")
 	root.PersistentFlags().StringVar(&model, "model", "", "model ID (ERKA_MODEL)")
 	root.PersistentFlags().StringVar(&baseURL, "provider-base-url", "", "provider API base URL")
@@ -110,6 +137,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 
 	root.AddCommand(newVersionCommand(info))
 	root.AddCommand(newRunCommand(func(ctx context.Context, prompt string, resume erkaruntime.TaskID, limits runLimits, output io.Writer) error {
+		limits.allowFullExecution = allowFullExecution
 		resolved, err := loadConfig(ctx, config.Options{
 			ConfigPath:         configPath,
 			StateDir:           stateDir,
@@ -124,7 +152,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 		if err != nil {
 			return fmt.Errorf("resolve configuration: %w", err)
 		}
-		return runTask(ctx, resolved, prompt, resume, output)
+		return runTask(ctx, resolved, prompt, resume, workingDirectory, output)
 	}))
 
 	return root
@@ -185,11 +213,10 @@ func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimi
 	command.Flags().IntVar(&limits.maxIterations, "max-iterations", 0, "maximum model/tool iterations")
 	command.Flags().Int64Var(&limits.maxOutputTokens, "max-output-tokens", 0, "maximum output tokens per model request")
 	command.Flags().DurationVar(&limits.stageTimeout, "timeout", 0, "overall stage timeout")
-	command.Flags().BoolVar(&limits.allowFullExecution, "full", false, "allow arbitrary commands with the current user's access")
 	return command
 }
 
-func runConfigured(ctx context.Context, resolved config.Resolved, objective string, resume erkaruntime.TaskID, output io.Writer) error {
+func runConfigured(ctx context.Context, resolved config.Resolved, objective string, resume erkaruntime.TaskID, workingDirectory string, output io.Writer) error {
 	providerName, baseURL := resolved.Provider, resolved.BaseURL
 	if providerName == "" {
 		providerName = "deepseek"
@@ -208,9 +235,11 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 	if err != nil {
 		return err
 	}
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("get working directory: %w", err)
+	if workingDirectory == "" {
+		workingDirectory, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get working directory: %w", err)
+		}
 	}
 	_, err = app.RunLocal(ctx, app.LocalOptions{
 		WorkingDirectory: workingDirectory, StateDir: resolved.StateDir,
@@ -223,6 +252,54 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 		},
 	})
 	return err
+}
+
+func launchConfigured(ctx context.Context, resolved config.Resolved, options tuiLaunchOptions, input io.Reader, output io.Writer) error {
+	manager := auth.NewDefaultManager()
+	key, _, credentialErr := manager.Resolve(ctx, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
+	if credentialErr != nil {
+		key, credentialErr = tui.PromptCredential(ctx, input, output, resolved.Provider)
+		if credentialErr != nil {
+			return credentialErr
+		}
+		if source, saveErr := manager.Save(ctx, resolved.Provider, resolved.BaseURL, key); saveErr != nil {
+			_, _ = fmt.Fprintf(output, "Warning: OS keyring unavailable; credential is in memory for this session only (%s).\n", source)
+		}
+	}
+	provider, err := deepseek.New(deepseek.Options{APIKey: key, BaseURL: resolved.BaseURL, Model: resolved.Model})
+	if err != nil {
+		return err
+	}
+	workingDirectory := options.WorkingDirectory
+	if workingDirectory == "" {
+		workingDirectory, err = os.Getwd()
+		if err != nil {
+			return err
+		}
+	}
+	live := make(chan erkaruntime.LiveUpdate, 128)
+	observer := erkaruntime.LiveObserverFunc(func(_ context.Context, update erkaruntime.LiveUpdate) {
+		select {
+		case live <- update:
+		default:
+		}
+	})
+	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, Observer: observer, Limits: erkaruntime.NativeLimits{MaxIterations: resolved.MaxIterations, MaxOutputTokens: resolved.MaxOutputTokens, MaxModelOutputBytes: 1 << 20, MaxCumulativeToolOutputBytes: 4 << 20, StageTimeout: resolved.StageTimeout}, AllowFullExecution: options.Full})
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: resolved.Provider, Model: resolved.Model, Branch: session.Branch(ctx), Full: options.Full, Live: live})
+	return tui.Run(model, input, output)
+}
+
+func terminalReader(reader io.Reader) bool {
+	file, ok := reader.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
+}
+func terminalWriter(writer io.Writer) bool {
+	file, ok := writer.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
 }
 
 func noArgs(_ *cobra.Command, args []string) error {

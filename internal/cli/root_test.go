@@ -57,6 +57,25 @@ func TestExecuteHelp(t *testing.T) {
 	}
 }
 
+func TestBareNonTTYPrintsHelpAndInteractiveLaunchesTUI(t *testing.T) {
+	t.Parallel()
+	stdout, stderr, code := executeForTest(t)
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "Usage:") {
+		t.Fatalf("non-TTY = %d, %q, %q", code, stdout, stderr)
+	}
+	var launched tuiLaunchOptions
+	var output bytes.Buffer
+	command := executeWithTUI(context.Background(), []string{"--cwd", "/repo", "--task", "task-7", "--full"}, strings.NewReader(""), &output, &output, buildinfo.Info{}, func(context.Context, config.Options) (config.Resolved, error) {
+		return config.Resolved{AllowFullExecution: true}, nil
+	}, fakeRunner, func(_ context.Context, _ config.Resolved, options tuiLaunchOptions, _ io.Reader, _ io.Writer) error {
+		launched = options
+		return nil
+	}, true)
+	if command != 0 || launched.WorkingDirectory != "/repo" || launched.TaskID != "task-7" || !launched.Full {
+		t.Fatalf("interactive launch = %d, %#v, %q", command, launched, output.String())
+	}
+}
+
 func TestExecuteRunRequiresPrompt(t *testing.T) {
 	t.Parallel()
 
@@ -133,7 +152,7 @@ func TestExecuteRunResumeDoesNotRequirePrompt(t *testing.T) {
 
 func TestRunConfiguredRequiresCredential(t *testing.T) {
 	t.Setenv("TEST_ERKA_MISSING_KEY", "")
-	err := runConfigured(context.Background(), config.Resolved{APIKeyEnv: "TEST_ERKA_MISSING_KEY"}, "fix", "", io.Discard)
+	err := runConfigured(context.Background(), config.Resolved{APIKeyEnv: "TEST_ERKA_MISSING_KEY"}, "fix", "", "", io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "TEST_ERKA_MISSING_KEY") {
 		t.Fatalf("runConfigured() error = %v", err)
 	}
@@ -200,7 +219,7 @@ func executeForTestWithLoader(
 	return stdout.String(), stderr.String(), code
 }
 
-func fakeRunner(_ context.Context, _ config.Resolved, objective string, resume erkaruntime.TaskID, output io.Writer) error {
+func fakeRunner(_ context.Context, _ config.Resolved, objective string, resume erkaruntime.TaskID, _ string, output io.Writer) error {
 	if resume != "" {
 		_, _ = fmt.Fprintf(output, "resumed: %s\n", resume)
 		return nil

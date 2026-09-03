@@ -36,7 +36,7 @@ func (*fakeController) RunNext(context.Context) (app.LocalResult, bool, error) {
 func (*fakeController) Resume(context.Context, erkaruntime.TaskID) (app.LocalResult, error) {
 	return app.LocalResult{Status: erkaruntime.TaskCompleted}, nil
 }
-func (*fakeController) Diff(context.Context) (string, error) { return "diff --git a/a b/a", nil }
+func (*fakeController) Diff(context.Context) (string, error) { return "diff", nil }
 func (*fakeController) UnknownOutcome(context.Context, erkaruntime.TaskID) (erkaruntime.ToolCall, bool, error) {
 	return erkaruntime.ToolCall{}, false, nil
 }
@@ -98,6 +98,15 @@ func TestSanitizeRemovesTerminalInjectionAndBoundsOutput(t *testing.T) {
 	}
 	if len(Sanitize(strings.Repeat("x", maxRenderedInputBytes+100))) != maxRenderedInputBytes {
 		t.Fatal("Sanitize did not bound output")
+	}
+}
+
+func TestCredentialEntryMasksSecret(t *testing.T) {
+	model := newCredentialModel(context.Background(), "deepseek")
+	model.input.SetValue("top-secret")
+	view := model.View().Content
+	if strings.Contains(view, "top-secret") || !strings.Contains(view, "••••") {
+		t.Fatalf("credential view = %q", view)
 	}
 }
 

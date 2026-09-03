@@ -319,6 +319,18 @@ func (session *Session) Diff(ctx context.Context) (string, error) {
 	return result.StandardOutput, nil
 }
 
+func (session *Session) Branch(ctx context.Context) string {
+	result, err := session.sandbox.Run(ctx, erkaruntime.CommandRequest{Executable: "git", Arguments: []string{"branch", "--show-current"}, Directory: ".", Timeout: 5 * time.Second, OutputLimitBytes: 1024})
+	if err != nil || result.ExitCode != 0 {
+		return "detached"
+	}
+	branch := strings.TrimSpace(result.StandardOutput)
+	if branch == "" {
+		return "detached"
+	}
+	return branch
+}
+
 func (session *Session) UnknownOutcome(ctx context.Context, taskID erkaruntime.TaskID) (erkaruntime.ToolCall, bool, error) {
 	items, err := session.database.LoadItems(ctx, taskID, 0)
 	if err != nil {
