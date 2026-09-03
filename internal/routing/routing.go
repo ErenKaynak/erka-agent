@@ -12,14 +12,14 @@ import (
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 )
 
-type Stage string
+type Stage = erkaruntime.Stage
 
 const (
-	StagePlanning   Stage = "planning"
-	StageCoding     Stage = "coding"
-	StageValidation Stage = "validation"
-	StageRepair     Stage = "repair"
-	StageReview     Stage = "review"
+	StagePlanning   = erkaruntime.StagePlanning
+	StageCoding     = erkaruntime.StageCoding
+	StageValidation = erkaruntime.StageValidation
+	StageRepair     = erkaruntime.StageRepair
+	StageReview     = erkaruntime.StageReview
 )
 
 var ErrNoRoute = errors.New("no eligible model route")

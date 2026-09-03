@@ -33,6 +33,7 @@ func TestStreamTranslatesTextFragmentedToolsUsageAndCompletion(t *testing.T) {
 			Model    string `json:"model"`
 			Messages []struct {
 				Role       string `json:"role"`
+				Content    string `json:"content"`
 				ToolCallID string `json:"tool_call_id"`
 			} `json:"messages"`
 			Tools []any `json:"tools"`
@@ -40,11 +41,14 @@ func TestStreamTranslatesTextFragmentedToolsUsageAndCompletion(t *testing.T) {
 		if err := json.Unmarshal(data, &body); err != nil {
 			t.Fatal(err)
 		}
-		if body.Model != "deepseek-v4-pro" || len(body.Messages) != 5 || len(body.Tools) != 1 {
+		if body.Model != "deepseek-v4-pro" || len(body.Messages) != 6 || len(body.Tools) != 1 {
 			t.Fatalf("request body = %s", data)
 		}
 		if body.Messages[4].Role != "tool" || body.Messages[4].ToolCallID != "old-call" {
 			t.Fatalf("tool result message = %#v", body.Messages[4])
+		}
+		if body.Messages[5].Role != "user" || !strings.Contains(body.Messages[5].Content, "approved plan") {
+			t.Fatalf("checkpoint message = %#v", body.Messages[5])
 		}
 		return sseResponse(strings.Join([]string{
 			`data: {"choices":[{"index":0,"delta":{"content":"Working "},"finish_reason":null}]}`,
@@ -168,6 +172,7 @@ func modelRequest() erkaruntime.ModelRequest {
 			{ID: "item-2", Sequence: 2, TaskID: "task", RunID: "run", Kind: erkaruntime.ItemAssistantMessage, Time: now, Message: &erkaruntime.Message{Content: "checking"}},
 			{ID: "item-3", Sequence: 3, TaskID: "task", RunID: "run", Kind: erkaruntime.ItemToolCall, Time: now, ToolCall: &erkaruntime.ToolCall{CallID: "old-call", Tool: "read_file", Arguments: json.RawMessage(`{"path":"x"}`)}},
 			{ID: "item-4", Sequence: 4, TaskID: "task", RunID: "run", Kind: erkaruntime.ItemToolResult, Time: now, ToolResult: &erkaruntime.ToolResult{CallID: "old-call", Output: "contents"}},
+			{ID: "item-5", Sequence: 5, TaskID: "task", RunID: "run", Kind: erkaruntime.ItemCheckpoint, Time: now, Checkpoint: &erkaruntime.Checkpoint{Objective: "fix it", ApprovedPlan: "approved plan"}},
 		},
 		Tools: []erkaruntime.ToolDefinition{{Name: "read_file", Description: "read", InputSchema: json.RawMessage(`{"type":"object"}`), OutputLimitBytes: 100}},
 	}

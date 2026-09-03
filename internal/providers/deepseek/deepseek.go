@@ -178,6 +178,12 @@ func (provider *Provider) requestBody(request erkaruntime.ModelRequest) ([]byte,
 			}}})
 		case erkaruntime.ItemToolResult:
 			messages = append(messages, message{Role: "tool", Content: item.ToolResult.Output, ToolCallID: string(item.ToolResult.CallID)})
+		case erkaruntime.ItemCheckpoint:
+			data, err := json.Marshal(item.Checkpoint)
+			if err != nil {
+				return nil, fmt.Errorf("encode checkpoint: %w", err)
+			}
+			messages = append(messages, message{Role: "user", Content: "Durable stage checkpoint:\n" + string(data)})
 		}
 	}
 	tools := make([]tool, len(request.Tools))
