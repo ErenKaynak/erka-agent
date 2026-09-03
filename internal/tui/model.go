@@ -423,7 +423,7 @@ func (model *Model) render() string {
 	}
 	result := header + "\n" + body + "\n" + footer
 	if model.overlay == "help" {
-		result = overlay(result, "Keyboard", "Enter  submit\nAlt/Shift+Enter  newline\nCtrl+O  conversations\nCtrl+N  new conversation\nCtrl+D  diff\nCtrl+P  permissions\nEsc  cancel\nCtrl+C  exit")
+		return overlay(model.width, model.height, "Keyboard", "Enter  submit\nAlt/Shift+Enter  newline\nCtrl+O  conversations\nCtrl+N  new conversation\nCtrl+D  diff\nCtrl+P  permissions\nEsc  cancel\nCtrl+C  exit\n?  close help")
 	}
 	if model.overlay == "picker" {
 		var choices strings.Builder
@@ -437,30 +437,30 @@ func (model *Model) render() string {
 		if choices.Len() == 0 {
 			choices.WriteString("No conversations yet.")
 		}
-		result = overlay(result, "Conversations", choices.String())
+		return overlay(model.width, model.height, "Conversations", choices.String())
 	}
 	if model.overlay == "diff" {
 		value := model.diff
 		if strings.TrimSpace(value) == "" {
 			value = "Working tree has no unstaged diff."
 		}
-		result = overlay(result, "Working tree diff", value+"\n\nEsc close")
+		return overlay(model.width, model.height, "Working tree diff", value+"\n\nEsc close")
 	}
 	if model.overlay == "permission" {
 		action := "enable unrestricted command execution"
 		if model.full {
 			action = "return to workspace-only execution"
 		}
-		result = overlay(result, "Session permissions", "Confirm "+action+"? This affects only the current process. [y/N]")
+		return overlay(model.width, model.height, "Session permissions", "Confirm "+action+"? This affects only the current process. [y/N]")
 	}
 	if model.overlay == "cancel" {
-		result = overlay(result, "Cancel active turn?", "The active process will stop; queued prompts remain durable. [y/N]")
+		return overlay(model.width, model.height, "Cancel active turn?", "The active process will stop; queued prompts remain durable. [y/N]")
 	}
 	if model.overlay == "recovery" {
-		result = overlay(result, "Interrupted mutation", fmt.Sprintf("%s (%s) may have run before interruption.\n\n[s] record success  [f] record failure  [Esc] leave paused", Sanitize(model.unknown.Tool), Sanitize(string(model.unknown.CallID))))
+		return overlay(model.width, model.height, "Interrupted mutation", fmt.Sprintf("%s (%s) may have run before interruption.\n\n[s] record success  [f] record failure  [Esc] leave paused", Sanitize(model.unknown.Tool), Sanitize(string(model.unknown.CallID))))
 	}
 	if model.confirmExit {
-		result = overlay(result, "Exit erka?", "Cancel the active process and exit? Queued prompts remain durable. [y/N]")
+		return overlay(model.width, model.height, "Exit erka?", "Cancel the active process and exit? Queued prompts remain durable. [y/N]")
 	}
 	return result
 }
@@ -521,8 +521,71 @@ func (model *Model) refresh() {
 	model.activity.GotoBottom()
 }
 
-func overlay(background, title, contents string) string {
-	return background + "\n\n" + lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2).Render(title+"\n\n"+contents)
+func overlay(width, height int, title, contents string) string {
+	if width <= 0 {
+		width = 100
+	}
+	if height <= 0 {
+		height = 30
+	}
+	outerWidth := width - 4
+	if outerWidth > 88 {
+		outerWidth = 88
+	}
+	if outerWidth < 12 {
+		outerWidth = 12
+	}
+	contentWidth := outerWidth - 6
+	maxBodyLines := height - 8
+	if maxBodyLines < 1 {
+		maxBodyLines = 1
+	}
+	title = fitOverlayText(Sanitize(title), contentWidth, 1)
+	contents = fitOverlayText(Sanitize(contents), contentWidth, maxBodyLines)
+	box := lipgloss.NewStyle().Width(contentWidth).Border(lipgloss.RoundedBorder()).Padding(1, 2).Render(title + "\n\n" + contents)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
+}
+
+func fitOverlayText(value string, width, maxLines int) string {
+	if width < 1 || maxLines < 1 {
+		return ""
+	}
+	lines := make([]string, 0, maxLines)
+	omitted := false
+	for _, source := range strings.Split(value, "\n") {
+		runes := []rune(source)
+		if len(runes) == 0 {
+			if len(lines) == maxLines {
+				omitted = true
+				break
+			}
+			lines = append(lines, "")
+			continue
+		}
+		for len(runes) > 0 {
+			if len(lines) == maxLines {
+				omitted = true
+				break
+			}
+			length := width
+			if len(runes) < length {
+				length = len(runes)
+			}
+			lines = append(lines, string(runes[:length]))
+			runes = runes[length:]
+		}
+		if omitted {
+			break
+		}
+	}
+	if omitted && len(lines) > 0 {
+		last := []rune(lines[len(lines)-1])
+		if len(last) >= width && width > 1 {
+			last = last[:width-1]
+		}
+		lines[len(lines)-1] = string(last) + "…"
+	}
+	return strings.Join(lines, "\n")
 }
 func errorText(err error) string {
 	if err == nil {

@@ -77,6 +77,29 @@ func TestModelResponsiveLayoutAndHelp(t *testing.T) {
 	}
 }
 
+func TestHelpOverlayFitsInsideSmallTerminal(t *testing.T) {
+	model := NewModel(Options{Controller: &fakeController{}, Provider: "deepseek", Model: "fixture"})
+	model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model.Update(key("?"))
+	view := model.View().Content
+	if !strings.Contains(view, "Keyboard") {
+		t.Fatalf("help overlay = %q", view)
+	}
+	if lines := strings.Count(view, "\n") + 1; lines > 12 {
+		t.Fatalf("help overlay has %d lines for a 12-line terminal:\n%s", lines, view)
+	}
+}
+
+func TestOverlayBoundsUntrustedLongContent(t *testing.T) {
+	view := overlay(32, 10, "Diff", strings.Repeat("0123456789", 20)+"\n"+strings.Repeat("line\n", 20))
+	if lines := strings.Count(view, "\n") + 1; lines > 10 {
+		t.Fatalf("overlay has %d lines:\n%s", lines, view)
+	}
+	if !strings.Contains(view, "…") {
+		t.Fatalf("bounded overlay has no truncation marker:\n%s", view)
+	}
+}
+
 func TestPermissionDialogRequiresConfirmationAndIsSessionOnly(t *testing.T) {
 	controller := &fakeController{}
 	model := NewModel(Options{Controller: controller})
