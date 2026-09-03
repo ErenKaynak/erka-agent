@@ -84,6 +84,15 @@ type NativeBackend struct {
 	Clock        func() time.Time
 }
 
+func (*NativeBackend) BackendClass() string { return BackendNative }
+
+func (backend *NativeBackend) Capabilities(ctx context.Context) (ModelCapabilities, error) {
+	if backend == nil || backend.Provider == nil {
+		return ModelCapabilities{}, errors.New("native backend requires a model provider")
+	}
+	return backend.Provider.Capabilities(ctx)
+}
+
 func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest, store Store) (StageResult, error) {
 	if err := request.validate(); err != nil {
 		return StageResult{}, err
@@ -883,4 +892,4 @@ func eventData(value map[string]any) json.RawMessage {
 	return data
 }
 
-var _ ExecutionBackend = (*NativeBackend)(nil)
+var _ StageBackend = (*NativeBackend)(nil)

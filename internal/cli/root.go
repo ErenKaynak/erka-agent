@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ErenKaynak/erka-agent/internal/app"
 	"github.com/ErenKaynak/erka-agent/internal/auth"
+	"github.com/ErenKaynak/erka-agent/internal/bridges"
 	"github.com/ErenKaynak/erka-agent/internal/buildinfo"
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	"github.com/ErenKaynak/erka-agent/internal/providers/deepseek"
@@ -26,6 +28,10 @@ import (
 var (
 	// ErrUsage identifies invalid command syntax and arguments.
 	ErrUsage = errors.New("invalid command usage")
+
+	// newAuthManager is overridden by tests that must not depend on the
+	// operating-system keyring.
+	newAuthManager = auth.NewDefaultManager
 )
 
 type configLoader func(context.Context, config.Options) (config.Resolved, error)
@@ -90,6 +96,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	var providerName string
 	var model string
 	var baseURL string
+	var apiKeyEnv string
 	var workingDirectory string
 	var taskID string
 	var allowFullExecution bool
@@ -108,7 +115,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 		},
 		RunE: func(command *cobra.Command, _ []string) error {
 			if interactive && launch != nil {
-				resolved, err := loadConfig(command.Context(), config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, Pipeline: pipeline, AllowFullExecution: allowFullExecution})
+				resolved, err := loadConfig(command.Context(), config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, APIKeyEnv: apiKeyEnv, Pipeline: pipeline, AllowFullExecution: allowFullExecution})
 				if err != nil {
 					return fmt.Errorf("resolve configuration: %w", err)
 				}
@@ -131,6 +138,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	root.PersistentFlags().StringVar(&providerName, "provider", "", "native provider name (ERKA_PROVIDER)")
 	root.PersistentFlags().StringVar(&model, "model", "", "model ID (ERKA_MODEL)")
 	root.PersistentFlags().StringVar(&baseURL, "provider-base-url", "", "provider API base URL")
+	root.PersistentFlags().StringVar(&apiKeyEnv, "api-key-env", "", "provider API key environment name (ERKA_API_KEY_ENV)")
 	root.PersistentFlags().StringVar(&pipeline, "pipeline", "", "configured fixed pipeline (ERKA_PIPELINE)")
 	root.PersistentFlags().StringVar(
 		&stateDir,
@@ -140,6 +148,10 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	)
 
 	root.AddCommand(newVersionCommand(info))
+	root.AddCommand(newAuthCommand(stdin))
+	root.AddCommand(newProvidersCommand(func(ctx context.Context) (config.Resolved, error) {
+		return loadConfig(ctx, config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, APIKeyEnv: apiKeyEnv, Pipeline: pipeline, AllowFullExecution: allowFullExecution})
+	}))
 	root.AddCommand(newRunCommand(func(ctx context.Context, prompt string, resume erkaruntime.TaskID, limits runLimits, output io.Writer) error {
 		limits.allowFullExecution = allowFullExecution
 		resolved, err := loadConfig(ctx, config.Options{
@@ -148,6 +160,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 			Provider:           providerName,
 			Model:              model,
 			BaseURL:            baseURL,
+			APIKeyEnv:          apiKeyEnv,
 			Pipeline:           pipeline,
 			MaxIterations:      limits.maxIterations,
 			MaxOutputTokens:    limits.maxOutputTokens,
@@ -217,12 +230,13 @@ func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimi
 	command.Flags().StringVar(&resume, "resume", "", "resume a durable task by ID")
 	command.Flags().IntVar(&limits.maxIterations, "max-iterations", 0, "maximum model/tool iterations")
 	command.Flags().Int64Var(&limits.maxOutputTokens, "max-output-tokens", 0, "maximum output tokens per model request")
-	command.Flags().DurationVar(&limits.stageTimeout, "timeout", 0, "overall stage timeout")
+	command.Flags().DurationVar(&limits.stageTimeout, "stage-timeout", 0, "overall stage timeout (ERKA_STAGE_TIMEOUT)")
+	command.Flags().DurationVar(&limits.stageTimeout, "timeout", 0, "overall stage timeout (alias for --stage-timeout)")
 	return command
 }
 
 func runConfigured(ctx context.Context, resolved config.Resolved, objective string, resume erkaruntime.TaskID, workingDirectory string, output io.Writer) error {
-	manager := auth.NewDefaultManager()
+	manager := newAuthManager()
 	if resolved.ActivePipeline != "" {
 		factory := configuredProviderFactory(manager)
 		if workingDirectory == "" {
@@ -232,7 +246,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 				return fmt.Errorf("get working directory: %w", err)
 			}
 		}
-		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, Limits: nativeLimits(resolved)})
+		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved)})
 		return err
 	}
 	providerName, baseURL := resolved.Provider, resolved.BaseURL
@@ -269,7 +283,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 }
 
 func launchConfigured(ctx context.Context, resolved config.Resolved, options tuiLaunchOptions, input io.Reader, output io.Writer) error {
-	manager := auth.NewDefaultManager()
+	manager := newAuthManager()
 	if resolved.ActivePipeline != "" {
 		if err := preparePipelineCredentials(ctx, resolved, manager, input, output); err != nil {
 			return err
@@ -289,7 +303,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 			default:
 			}
 		})
-		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full})
+		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full})
 		if err != nil {
 			return err
 		}
@@ -356,6 +370,16 @@ func configuredProviderFactory(manager *auth.Manager) app.ProviderFactory {
 	}
 }
 
+func configuredBridgeFactory() app.BridgeFactory {
+	return func(_ context.Context, candidate routing.Candidate) (erkaruntime.SubscriptionBridge, error) {
+		bridge, err := bridges.New(candidate.Provider, candidate.Command)
+		if err != nil {
+			return nil, &routing.AttemptError{Kind: routing.FailureInvalid, Err: err}
+		}
+		return bridge, nil
+	}
+}
+
 func openNativeProvider(providerName, baseURL, model, key string) (erkaruntime.ModelProvider, error) {
 	switch providerName {
 	case "deepseek":
@@ -379,6 +403,9 @@ func preparePipelineCredentials(ctx context.Context, resolved config.Resolved, m
 			return err
 		}
 		for _, candidate := range route.Candidates {
+			if candidate.BackendClass == config.ConnectionSubscriptionBridge {
+				continue
+			}
 			account, err := auth.Account(candidate.Provider, candidate.BaseURL)
 			if err != nil {
 				return err
@@ -402,6 +429,103 @@ func preparePipelineCredentials(ctx context.Context, resolved config.Resolved, m
 	return nil
 }
 
+func newAuthCommand(input io.Reader) *cobra.Command {
+	command := &cobra.Command{Use: "auth", Short: "Manage subscription bridge authentication", Args: noArgs}
+	var device bool
+	login := &cobra.Command{
+		Use: "login <codex|opencode>", Short: "Delegate login to an official bridge CLI",
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("%w: auth login requires exactly one bridge name", ErrUsage)
+			}
+			return nil
+		},
+		RunE: func(command *cobra.Command, args []string) error {
+			if device && strings.ToLower(strings.TrimSpace(args[0])) != "codex" {
+				return fmt.Errorf("%w: --device is only supported for codex", ErrUsage)
+			}
+			return bridges.Login(command.Context(), args[0], "", device, input, command.OutOrStdout(), command.ErrOrStderr())
+		},
+	}
+	login.Flags().BoolVar(&device, "device", false, "use the Codex device-code login flow")
+	status := &cobra.Command{
+		Use: "status", Short: "Report subscription bridge authentication", Args: noArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			for _, bridge := range []erkaruntime.SubscriptionBridge{bridges.NewCodex(bridges.CodexOptions{}), bridges.NewOpenCode(bridges.OpenCodeOptions{})} {
+				availability, err := bridge.Availability(command.Context())
+				if err != nil {
+					return fmt.Errorf("inspect %s bridge: %w", bridge.Name(), err)
+				}
+				state := "unavailable"
+				if availability.Available {
+					state = "login required"
+				}
+				if availability.Authenticated {
+					state = "authenticated"
+				}
+				if _, err := fmt.Fprintf(command.OutOrStdout(), "%s\t%s\t%s\n", bridge.Name(), state, availability.Detail); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	command.AddCommand(login, status)
+	return command
+}
+
+func newProvidersCommand(load func(context.Context) (config.Resolved, error)) *cobra.Command {
+	return &cobra.Command{
+		Use: "providers", Short: "Report configured native providers and subscription bridges", Args: noArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			resolved, err := load(command.Context())
+			if err != nil {
+				return fmt.Errorf("resolve configuration: %w", err)
+			}
+			if _, err := fmt.Fprintln(command.OutOrStdout(), "NAME\tCLASS\tPROVIDER\tSTATE\tCAPABILITIES"); err != nil {
+				return err
+			}
+			if len(resolved.Connections) == 0 {
+				_, err = fmt.Fprintf(command.OutOrStdout(), "default\t%s\t%s\tconfigured\tprovider-defined\n", config.ConnectionNative, resolved.Provider)
+				return err
+			}
+			names := make([]string, 0, len(resolved.Connections))
+			for name := range resolved.Connections {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				connection := resolved.Connections[name]
+				state := "configured"
+				capabilities := "provider-defined"
+				if connection.Class == config.ConnectionSubscriptionBridge {
+					bridge, openErr := bridges.New(connection.Provider, connection.Command)
+					if openErr != nil {
+						return openErr
+					}
+					available, inspectErr := bridge.Availability(command.Context())
+					if inspectErr != nil {
+						return inspectErr
+					}
+					state = "unavailable"
+					if available.Available {
+						state = "login required"
+					}
+					if available.Authenticated {
+						state = "available"
+					}
+					caps, _ := bridge.Capabilities(command.Context())
+					capabilities = fmt.Sprintf("tools=%t structured_output=%t", caps.Tools, caps.StructuredOutput)
+				}
+				if _, err := fmt.Fprintf(command.OutOrStdout(), "%s\t%s\t%s\t%s\t%s\n", name, connection.Class, connection.Provider, state, capabilities); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
 func terminalReader(reader io.Reader) bool {
 	file, ok := reader.(*os.File)
 	return ok && term.IsTerminal(int(file.Fd()))
@@ -416,13 +540,4 @@ func noArgs(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("%w: expected no arguments, received %d", ErrUsage, len(args))
 	}
 	return nil
-}
-
-func exactArgs(want int) cobra.PositionalArgs {
-	return func(_ *cobra.Command, args []string) error {
-		if len(args) != want {
-			return fmt.Errorf("%w: expected %d argument, received %d", ErrUsage, want, len(args))
-		}
-		return nil
-	}
 }

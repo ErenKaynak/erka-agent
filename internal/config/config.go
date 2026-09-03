@@ -20,14 +20,16 @@ import (
 const CurrentVersion = 1
 
 const (
-	DefaultProvider       = "deepseek"
-	DefaultModel          = "deepseek-v4-flash"
-	DefaultDeepSeekURL    = "https://api.deepseek.com"
-	DefaultOpenAIURL      = "https://api.openai.com"
-	DefaultAPIKeyEnv      = "ERKA_DEEPSEEK_API_KEY"
-	DefaultMaxIterations  = 24
-	DefaultMaxOutputToken = int64(8192)
-	DefaultStageTimeout   = 30 * time.Minute
+	DefaultProvider              = "deepseek"
+	DefaultModel                 = "deepseek-v4-flash"
+	DefaultDeepSeekURL           = "https://api.deepseek.com"
+	DefaultOpenAIURL             = "https://api.openai.com"
+	DefaultAPIKeyEnv             = "ERKA_DEEPSEEK_API_KEY"
+	DefaultMaxIterations         = 24
+	DefaultMaxOutputToken        = int64(8192)
+	DefaultStageTimeout          = 30 * time.Minute
+	ConnectionNative             = "native"
+	ConnectionSubscriptionBridge = "subscription_bridge"
 )
 
 // Source identifies where a resolved configuration value originated.
@@ -69,11 +71,13 @@ type Resolved struct {
 	Pipelines          map[string]Pipeline
 }
 
-// Connection names one native provider endpoint and its non-secret model
-// metadata. Credentials are referenced by environment variable name and are
-// resolved by the trusted credential layer.
+// Connection names either a native provider endpoint or an explicitly labeled
+// optional subscription bridge. Native credentials are referenced by
+// environment variable name; bridge credentials remain owned by the vendor.
 type Connection struct {
 	Provider  string                 `yaml:"provider"`
+	Class     string                 `yaml:"class,omitempty"`
+	Command   string                 `yaml:"command,omitempty"`
 	BaseURL   string                 `yaml:"base_url,omitempty"`
 	APIKeyEnv string                 `yaml:"api_key_env,omitempty"`
 	Models    map[string]ModelConfig `yaml:"models,omitempty"`
@@ -248,6 +252,7 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 	applyStringEnv(options.LookupEnv, "ERKA_PROVIDER", &resolved.Provider, &resolved.ProviderSource)
 	applyStringEnv(options.LookupEnv, "ERKA_MODEL", &resolved.Model, &resolved.ModelSource)
 	applyStringEnv(options.LookupEnv, "ERKA_DEEPSEEK_BASE_URL", &resolved.BaseURL, &resolved.BaseURLSource)
+	applyStringEnv(options.LookupEnv, "ERKA_PROVIDER_BASE_URL", &resolved.BaseURL, &resolved.BaseURLSource)
 	if value, ok := nonEmptyEnv(options.LookupEnv, "ERKA_API_KEY_ENV"); ok {
 		resolved.APIKeyEnv = value
 	}
@@ -357,25 +362,47 @@ func validateRouting(resolved *Resolved) error {
 			return fmt.Errorf("invalid connection name %q", name)
 		}
 		connection.Provider = strings.ToLower(strings.TrimSpace(connection.Provider))
-		if connection.Provider != "deepseek" && connection.Provider != "openai" {
-			return fmt.Errorf("connection %q uses unsupported native provider %q", name, connection.Provider)
+		connection.Class = strings.ToLower(strings.TrimSpace(connection.Class))
+		if connection.Class == "" {
+			connection.Class = ConnectionNative
 		}
-		if connection.BaseURL == "" {
-			if connection.Provider == "openai" {
-				connection.BaseURL = DefaultOpenAIURL
-			} else {
-				connection.BaseURL = DefaultDeepSeekURL
+		switch connection.Class {
+		case ConnectionNative:
+			if connection.Provider != "deepseek" && connection.Provider != "openai" {
+				return fmt.Errorf("connection %q uses unsupported native provider %q", name, connection.Provider)
 			}
-		}
-		if connection.APIKeyEnv == "" {
-			if connection.Provider == "openai" {
-				connection.APIKeyEnv = "OPENAI_API_KEY"
-			} else {
-				connection.APIKeyEnv = DefaultAPIKeyEnv
+			if connection.Command != "" {
+				return fmt.Errorf("native connection %q cannot configure a bridge command", name)
 			}
-		}
-		if !validEnvironmentName(connection.APIKeyEnv) || credentialEnvironmentConflicts(connection.APIKeyEnv) {
-			return fmt.Errorf("connection %q has invalid API key environment %q", name, connection.APIKeyEnv)
+			if connection.BaseURL == "" {
+				if connection.Provider == "openai" {
+					connection.BaseURL = DefaultOpenAIURL
+				} else {
+					connection.BaseURL = DefaultDeepSeekURL
+				}
+			}
+			if connection.APIKeyEnv == "" {
+				if connection.Provider == "openai" {
+					connection.APIKeyEnv = "OPENAI_API_KEY"
+				} else {
+					connection.APIKeyEnv = DefaultAPIKeyEnv
+				}
+			}
+			if !validEnvironmentName(connection.APIKeyEnv) || credentialEnvironmentConflicts(connection.APIKeyEnv) {
+				return fmt.Errorf("connection %q has invalid API key environment %q", name, connection.APIKeyEnv)
+			}
+		case ConnectionSubscriptionBridge:
+			if connection.Provider != "codex" && connection.Provider != "opencode" {
+				return fmt.Errorf("connection %q uses unsupported subscription bridge %q", name, connection.Provider)
+			}
+			if connection.BaseURL != "" || connection.APIKeyEnv != "" {
+				return fmt.Errorf("subscription bridge %q must not configure a base URL or API key environment", name)
+			}
+			if connection.Command == "" {
+				connection.Command = connection.Provider
+			}
+		default:
+			return fmt.Errorf("connection %q uses unsupported class %q", name, connection.Class)
 		}
 		for model, metadata := range connection.Models {
 			if strings.TrimSpace(model) == "" || metadata.ContextTokens < 0 || metadata.InputCostPerMillionMicrounits < 0 || metadata.OutputCostPerMillionMicrounits < 0 {
@@ -440,7 +467,7 @@ func validateRouting(resolved *Resolved) error {
 			}
 			for _, candidate := range route.Candidates {
 				connectionName, model, ok := strings.Cut(candidate, "/")
-				if !ok || connectionName == "" || model == "" || strings.Contains(model, "/") {
+				if !ok || connectionName == "" || model == "" {
 					return fmt.Errorf("pipeline %q stage %q has invalid candidate %q", name, stage, candidate)
 				}
 				connection, exists := resolved.Connections[connectionName]
@@ -451,6 +478,9 @@ func validateRouting(resolved *Resolved) error {
 					if _, exists := connection.Models[model]; !exists {
 						return fmt.Errorf("pipeline %q stage %q references unknown model %q on connection %q", name, stage, model, connectionName)
 					}
+				}
+				if connection.Class == ConnectionSubscriptionBridge && stage != "planning" && stage != "review" {
+					return fmt.Errorf("pipeline %q stage %q cannot use subscription bridge %q", name, stage, connectionName)
 				}
 			}
 		}

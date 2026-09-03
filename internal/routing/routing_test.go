@@ -26,6 +26,27 @@ func TestResolveFixedPreservesCandidateOrderAndDefaultsBudgets(t *testing.T) {
 	}
 }
 
+func TestResolveFixedLabelsBridgeAndPreservesNestedModelID(t *testing.T) {
+	t.Parallel()
+	resolved := config.Resolved{
+		ActivePipeline: "default",
+		Connections: map[string]config.Connection{
+			"oc": {Class: config.ConnectionSubscriptionBridge, Provider: "opencode", Command: "/opt/opencode"},
+		},
+		Pipelines: map[string]config.Pipeline{"default": {Routing: "fixed", Stages: map[string]config.StageRoute{
+			"planning": {Candidates: []string{"oc/github-copilot/gpt-model"}},
+		}}},
+	}
+	route, err := ResolveFixed(resolved, StagePlanning, erkaruntime.DefaultNativeLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := route.Candidates[0]
+	if candidate.BackendClass != config.ConnectionSubscriptionBridge || candidate.Model != "github-copilot/gpt-model" || candidate.Command != "/opt/opencode" {
+		t.Fatalf("candidate = %#v", candidate)
+	}
+}
+
 func TestEligibleUsesProviderAndConfiguredCapabilities(t *testing.T) {
 	t.Parallel()
 	route := Route{RequiredCapabilities: []string{"tools", "structured_output"}}

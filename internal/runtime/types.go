@@ -79,15 +79,15 @@ type Usage struct {
 }
 
 type Checkpoint struct {
-	Objective           string
-	Constraints         []string
-	ApprovedPlan        string
-	Decisions           []string
-	RelevantFiles       []string
-	DiffSummary         string
-	ValidationResults   []string
-	UnresolvedProblems  []string
-	SuggestedNextAction string
+	Objective           string   `json:"objective"`
+	Constraints         []string `json:"constraints"`
+	ApprovedPlan        string   `json:"approved_plan"`
+	Decisions           []string `json:"decisions"`
+	RelevantFiles       []string `json:"relevant_files"`
+	DiffSummary         string   `json:"diff_summary"`
+	ValidationResults   []string `json:"validation_results"`
+	UnresolvedProblems  []string `json:"unresolved_problems"`
+	SuggestedNextAction string   `json:"suggested_next_action"`
 }
 
 type RuntimeError struct {

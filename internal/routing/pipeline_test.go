@@ -28,7 +28,7 @@ func TestPipelineHandsDurablePlanToDifferentCodingProvider(t *testing.T) {
 		{Kind: erkaruntime.ModelUsage, Usage: &erkaruntime.Usage{InputTokens: 8, OutputTokens: 4}},
 		{Kind: erkaruntime.ModelCompleted},
 	}}}
-	engine := testPipelineEngine(memory, ids, now, pipelineConfig(), func(_ context.Context, candidate Candidate, stage Stage, limits erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error) {
+	engine := testPipelineEngine(memory, ids, now, pipelineConfig(), func(_ context.Context, candidate Candidate, stage Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
 		provider := coder
 		if stage == StagePlanning {
 			provider = planner
@@ -85,7 +85,7 @@ func TestPipelineFallsBackInOrderBeforeMutation(t *testing.T) {
 	backup := &pipelineProvider{name: "deepseek", responses: [][]erkaruntime.ModelOutput{{{Kind: erkaruntime.ModelTextDelta, Text: "Backup plan."}, {Kind: erkaruntime.ModelCompleted}}}}
 	coder := &pipelineProvider{name: "deepseek", responses: [][]erkaruntime.ModelOutput{{{Kind: erkaruntime.ModelTextDelta, Text: "Done."}, {Kind: erkaruntime.ModelCompleted}}}}
 	var opened []string
-	engine := testPipelineEngine(memory, ids, now, resolved, func(_ context.Context, candidate Candidate, stage Stage, limits erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error) {
+	engine := testPipelineEngine(memory, ids, now, resolved, func(_ context.Context, candidate Candidate, stage Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
 		opened = append(opened, candidate.Reference)
 		if candidate.Reference == "planner/p" {
 			return nil, &AttemptError{Kind: FailureRateLimit, Err: errors.New("rate limited")}
@@ -127,7 +127,7 @@ func TestPipelineRepairsFailedValidationAndRevalidates(t *testing.T) {
 		StageReview:     {{{Kind: erkaruntime.ModelTextDelta, Text: "Review passed."}, {Kind: erkaruntime.ModelCompleted}}},
 	}
 	providers := make(map[Stage]*pipelineProvider)
-	engine := testPipelineEngine(memory, ids, now, resolved, func(_ context.Context, _ Candidate, stage Stage, limits erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error) {
+	engine := testPipelineEngine(memory, ids, now, resolved, func(_ context.Context, _ Candidate, stage Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
 		provider := providers[stage]
 		if provider == nil {
 			provider = &pipelineProvider{name: "fixture", responses: responses[stage]}
@@ -165,7 +165,7 @@ func TestPipelineResumeContinuesAfterCompletedPlanningRun(t *testing.T) {
 		{Kind: erkaruntime.ModelTextDelta, Text: "Durable restart plan."},
 		{Kind: erkaruntime.ModelCompleted},
 	}}}
-	first := testPipelineEngine(memory, ids, now, pipelineConfig(), func(_ context.Context, _ Candidate, _ Stage, limits erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error) {
+	first := testPipelineEngine(memory, ids, now, pipelineConfig(), func(_ context.Context, _ Candidate, _ Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
 		return &erkaruntime.NativeBackend{Provider: planner, Instructions: "pipeline", Limits: limits, IDs: ids, Clock: func() time.Time { return now }}, nil
 	})
 	attempt, err := first.executeStage(context.Background(), PipelineRequest{TaskID: "task-1", Objective: "fix checkout", InitialRun: initial}, StagePlanning, &initial, map[Stage]int{})
@@ -181,7 +181,7 @@ func TestPipelineResumeContinuesAfterCompletedPlanningRun(t *testing.T) {
 		{Kind: erkaruntime.ModelTextDelta, Text: "Resumed at coding."},
 		{Kind: erkaruntime.ModelCompleted},
 	}}}
-	resumed := testPipelineEngine(memory, ids, now, pipelineConfig(), func(_ context.Context, _ Candidate, stage Stage, limits erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error) {
+	resumed := testPipelineEngine(memory, ids, now, pipelineConfig(), func(_ context.Context, _ Candidate, stage Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
 		if stage == StagePlanning {
 			return nil, errors.New("completed planning stage was replayed")
 		}

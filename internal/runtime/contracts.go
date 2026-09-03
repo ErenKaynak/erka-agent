@@ -120,6 +120,11 @@ type ModelProvider interface {
 	Stream(context.Context, ModelRequest) (ModelStream, error)
 }
 
+const (
+	BackendNative             = "native"
+	BackendSubscriptionBridge = "subscription_bridge"
+)
+
 // ProviderError is a bounded, provider-neutral failure classification used by
 // deterministic routing. Message must never contain credentials or raw request
 // headers.
@@ -452,4 +457,43 @@ type StageResult struct {
 // ExecutionBackend runs one stage and records durable progress through Store.
 type ExecutionBackend interface {
 	RunStage(context.Context, StageRequest, Store) (StageResult, error)
+}
+
+// StageBackend is the pipeline boundary shared by native providers and
+// explicitly labeled subscription bridges.
+type StageBackend interface {
+	ExecutionBackend
+	BackendClass() string
+	Capabilities(context.Context) (ModelCapabilities, error)
+}
+
+type BridgeAvailability struct {
+	Available     bool
+	Authenticated bool
+	Version       string
+	Detail        string
+}
+
+type BridgeRequest struct {
+	Stage            Stage
+	Model            string
+	WorkingDirectory string
+	Prompt           string
+	MaxOutputBytes   int64
+}
+
+type BridgeResult struct {
+	Output     string
+	Checkpoint Checkpoint
+	Usage      Usage
+}
+
+// SubscriptionBridge translates one official vendor agent process into a
+// bounded provider-neutral stage result. Credentials remain in the vendor's
+// isolated credential store and are never returned through this interface.
+type SubscriptionBridge interface {
+	Name() string
+	Capabilities(context.Context) (ModelCapabilities, error)
+	Availability(context.Context) (BridgeAvailability, error)
+	Execute(context.Context, BridgeRequest) (BridgeResult, error)
 }

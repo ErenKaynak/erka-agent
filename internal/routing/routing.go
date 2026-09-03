@@ -26,13 +26,15 @@ var ErrNoRoute = errors.New("no eligible model route")
 var ErrBudgetExceeded = errors.New("stage budget exceeded")
 
 type Candidate struct {
-	Reference  string
-	Connection string
-	Model      string
-	Provider   string
-	BaseURL    string
-	APIKeyEnv  string
-	Metadata   config.ModelConfig
+	Reference    string
+	Connection   string
+	Model        string
+	Provider     string
+	BackendClass string
+	Command      string
+	BaseURL      string
+	APIKeyEnv    string
+	Metadata     config.ModelConfig
 }
 
 type Budget struct {
@@ -66,9 +68,14 @@ func ResolveFixed(resolved config.Resolved, stage Stage, defaults erkaruntime.Na
 	for _, reference := range configured.Candidates {
 		connectionName, model, _ := strings.Cut(reference, "/")
 		connection := resolved.Connections[connectionName]
+		backendClass := connection.Class
+		if backendClass == "" {
+			backendClass = config.ConnectionNative
+		}
 		route.Candidates = append(route.Candidates, Candidate{
 			Reference: reference, Connection: connectionName, Model: model,
 			Provider: connection.Provider, BaseURL: connection.BaseURL,
+			BackendClass: backendClass, Command: connection.Command,
 			APIKeyEnv: connection.APIKeyEnv, Metadata: connection.Models[model],
 		})
 	}

@@ -205,6 +205,39 @@ permissions:
 	}
 }
 
+func TestLoadProviderBaseURLGenericOverride(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "generic only",
+			env:  map[string]string{"ERKA_PROVIDER_BASE_URL": "https://generic.example"},
+			want: "https://generic.example",
+		},
+		{
+			name: "generic wins over deepseek",
+			env:  map[string]string{"ERKA_DEEPSEEK_BASE_URL": "https://deepseek.example", "ERKA_PROVIDER_BASE_URL": "https://generic.example"},
+			want: "https://generic.example",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Load(context.Background(), Options{GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(test.env), ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.BaseURL != test.want || got.BaseURLSource != SourceEnvironment {
+				t.Fatalf("BaseURL = %q (%s), want %q", got.BaseURL, got.BaseURLSource, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadPipelineConnectionsAndBudgets(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
@@ -259,6 +292,70 @@ pipelines:
 	budget := got.Pipelines["default"].Stages["planning"].Budget
 	if budget.MaxInputTokens != 20000 || budget.MaxOutputTokens != 4000 || budget.MaxIterations != 3 || budget.Timeout != "5m" || budget.MaxCostMicrounits != 500000 || budget.Currency != "USD" {
 		t.Fatalf("planning budget = %#v", budget)
+	}
+}
+
+func TestLoadSubscriptionBridgeConnection(t *testing.T) {
+	t.Parallel()
+	content := `version: 1
+pipeline: default
+connections:
+  chatgpt:
+    class: subscription_bridge
+    provider: codex
+    command: /opt/codex/bin/codex
+    models:
+      default:
+        capabilities: [tools, structured_output]
+  coder:
+    provider: deepseek
+pipelines:
+  default:
+    routing: fixed
+    stages:
+      planning:
+        candidates: [chatgpt/default]
+        required_capabilities: [structured_output]
+      coding:
+        candidates: [coder/deepseek-v4-flash]
+`
+	resolved, err := Load(context.Background(), Options{GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil), ReadFile: func(string) ([]byte, error) { return []byte(content), nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := resolved.Connections["chatgpt"]
+	if bridge.Class != ConnectionSubscriptionBridge || bridge.Provider != "codex" || bridge.Command != "/opt/codex/bin/codex" || bridge.APIKeyEnv != "" || bridge.BaseURL != "" {
+		t.Fatalf("bridge connection = %#v", bridge)
+	}
+}
+
+func TestSubscriptionBridgeIsRejectedForMutatingStagesAndSecrets(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "coding stage",
+			content: "version: 1\nconnections:\n  b: {class: subscription_bridge, provider: codex}\npipelines:\n  default:\n    routing: fixed\n    stages:\n      planning: {candidates: [b/default]}\n      coding: {candidates: [b/default]}\n",
+			want:    "cannot use subscription bridge",
+		},
+		{
+			name:    "API key environment",
+			content: "version: 1\nconnections:\n  b: {class: subscription_bridge, provider: codex, api_key_env: OPENAI_API_KEY}\npipelines:\n  default:\n    routing: fixed\n    stages:\n      planning: {candidates: [b/default]}\n      coding: {candidates: [b/default]}\n",
+			want:    "must not configure",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Load(context.Background(), Options{GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil), ReadFile: func(string) ([]byte, error) { return []byte(test.content), nil }})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Load() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

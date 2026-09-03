@@ -32,9 +32,11 @@ type SessionOptions struct {
 	AllowFullExecution bool
 	Pipeline           config.Resolved
 	ProviderFactory    ProviderFactory
+	BridgeFactory      BridgeFactory
 }
 
 type ProviderFactory func(context.Context, routing.Candidate) (erkaruntime.ModelProvider, error)
+type BridgeFactory func(context.Context, routing.Candidate) (erkaruntime.SubscriptionBridge, error)
 
 type Session struct {
 	mu       sync.Mutex
@@ -66,6 +68,9 @@ func OpenSession(ctx context.Context, options SessionOptions) (*Session, error) 
 	}
 	if options.Pipeline.ActivePipeline != "" && options.ProviderFactory == nil {
 		return nil, errors.New("local pipeline session requires a provider factory")
+	}
+	if pipelineUsesBridge(options.Pipeline) && options.BridgeFactory == nil {
+		return nil, errors.New("local pipeline session requires a subscription bridge factory")
 	}
 	root, err := DiscoverRepository(options.WorkingDirectory)
 	if err != nil {
@@ -246,7 +251,7 @@ func (session *Session) newInitialRun(now time.Time) (erkaruntime.Run, error) {
 			return erkaruntime.Run{}, err
 		}
 		candidate := route.Candidates[0]
-		run.Stage, run.Connection, run.Provider, run.Model = string(routing.StagePlanning), candidate.Connection, candidate.Provider, candidate.Model
+		run.Stage, run.BackendClass, run.Connection, run.Provider, run.Model = string(routing.StagePlanning), candidate.BackendClass, candidate.Connection, candidate.Provider, candidate.Model
 		return run, nil
 	}
 	run.Provider, run.Model = session.options.Provider.Name(), session.options.Provider.Name()
@@ -299,7 +304,14 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 	var err error
 	if session.options.Pipeline.ActivePipeline != "" {
 		engine := &routing.PipelineEngine{Config: session.options.Pipeline, Store: session.database, IDs: session.options.IDs, Clock: session.options.Clock, Limits: session.options.Limits}
-		engine.Factory = func(factoryCtx context.Context, candidate routing.Candidate, stageName routing.Stage, limits erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error) {
+		engine.Factory = func(factoryCtx context.Context, candidate routing.Candidate, stageName routing.Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
+			if candidate.BackendClass == config.ConnectionSubscriptionBridge {
+				bridge, openErr := session.options.BridgeFactory(factoryCtx, candidate)
+				if openErr != nil {
+					return nil, openErr
+				}
+				return &erkaruntime.BridgeBackend{Bridge: bridge, WorkingDirectory: session.root, Model: candidate.Model, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
+			}
 			provider, openErr := session.options.ProviderFactory(factoryCtx, candidate)
 			if openErr != nil {
 				return nil, openErr
@@ -341,6 +353,22 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 	}
 	result.Summary = checkpointSummary(stage.Checkpoint)
 	return result, true, err
+}
+
+func pipelineUsesBridge(resolved config.Resolved) bool {
+	pipeline, ok := resolved.Pipelines[resolved.ActivePipeline]
+	if !ok {
+		return false
+	}
+	for _, route := range pipeline.Stages {
+		for _, reference := range route.Candidates {
+			connection, _, _ := strings.Cut(reference, "/")
+			if resolved.Connections[connection].Class == config.ConnectionSubscriptionBridge {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func checkpointSummary(checkpoint erkaruntime.Checkpoint) string {

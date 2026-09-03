@@ -30,6 +30,7 @@ type LocalOptions struct {
 	AllowFullExecution bool
 	Pipeline           config.Resolved
 	ProviderFactory    ProviderFactory
+	BridgeFactory      BridgeFactory
 }
 
 type LocalResult struct {
@@ -46,7 +47,7 @@ func RunLocal(ctx context.Context, options LocalOptions) (LocalResult, error) {
 	if options.Provider == nil && options.Pipeline.ActivePipeline == "" {
 		return LocalResult{}, errors.New("local run requires a model provider")
 	}
-	session, err := OpenSession(ctx, SessionOptions{WorkingDirectory: options.WorkingDirectory, StateDir: options.StateDir, Provider: options.Provider, Output: options.Output, IDs: options.IDs, Clock: options.Clock, Limits: options.Limits, AllowFullExecution: options.AllowFullExecution, Pipeline: options.Pipeline, ProviderFactory: options.ProviderFactory})
+	session, err := OpenSession(ctx, SessionOptions{WorkingDirectory: options.WorkingDirectory, StateDir: options.StateDir, Provider: options.Provider, Output: options.Output, IDs: options.IDs, Clock: options.Clock, Limits: options.Limits, AllowFullExecution: options.AllowFullExecution, Pipeline: options.Pipeline, ProviderFactory: options.ProviderFactory, BridgeFactory: options.BridgeFactory})
 	if err != nil {
 		return LocalResult{}, err
 	}

@@ -100,9 +100,11 @@ permissions:
 
 Use `--config`, `ERKA_CONFIG_PATH`, and `ERKA_STATE_DIR` to override the
 platform-standard locations. The default native endpoint is
-`https://api.deepseek.com`; `--provider-base-url` exists for compatible test
-endpoints. Secrets do not belong in YAML—`ERKA_DEEPSEEK_API_KEY` is read by the
-trusted provider adapter and excluded from tool subprocess environments.
+`https://api.deepseek.com`; `--provider-base-url` (or `ERKA_PROVIDER_BASE_URL`)
+selects a compatible test endpoint, and `--api-key-env` (or `ERKA_API_KEY_ENV`)
+overrides the credential environment name. Secrets do not belong in YAML—
+`ERKA_DEEPSEEK_API_KEY` is read by the trusted provider adapter and excluded
+from tool subprocess environments.
 
 ### Fixed multi-model pipelines
 
@@ -183,6 +185,67 @@ Cost limits can then be set with `max_cost_microunits` and `currency` inside a
 stage budget. These values are configuration supplied by the operator; erka
 does not fetch changing prices from a provider.
 
+### Subscription bridges
+
+M3 can use an installed vendor CLI as an explicitly labeled subscription
+bridge for planning or review. Bridge credentials remain in the vendor's own
+credential store and are never copied into erka configuration, SQLite, model
+context, or native-provider subprocess environments.
+
+Sign in to Codex with ChatGPT subscription authentication through the official
+device-code flow, then inspect bridge availability:
+
+```bash
+erka auth login codex --device
+erka auth status
+erka providers
+```
+
+OpenCode authentication can be delegated with `erka auth login opencode`. Both
+CLIs are optional runtime discoveries; erka does not download, link, or depend
+on either executable.
+
+Configure a bridge connection with `class: subscription_bridge`. `default`
+lets Codex select the model available to the signed-in account; an explicit
+model may be used instead. OpenCode model IDs may retain their
+`provider/model` form after the erka connection name.
+
+```yaml
+version: 1
+pipeline: subscription-plan
+
+connections:
+  chatgpt:
+    class: subscription_bridge
+    provider: codex
+    models:
+      default:
+        capabilities: [tools, structured_output]
+  coder:
+    provider: deepseek
+    api_key_env: ERKA_DEEPSEEK_API_KEY
+
+pipelines:
+  subscription-plan:
+    routing: fixed
+    stages:
+      planning:
+        candidates: [chatgpt/default]
+        required_capabilities: [structured_output]
+        budget:
+          max_input_tokens: 20000
+          max_output_tokens: 4000
+          timeout: 10m
+      coding:
+        candidates: [coder/deepseek-v4-flash]
+```
+
+Codex runs non-interactively with its read-only sandbox, ephemeral vendor
+session, JSONL events, and a strict checkpoint output schema. OpenCode runs its
+JSON stream through a deny-by-default plan profile with project configuration
+disabled. Subscription bridges are rejected for coding, validation, and repair
+stages.
+
 ## Product promise
 
 - Run without a server on macOS, Linux, or Windows.
@@ -219,7 +282,7 @@ multi-user SaaS, distributed workers, or automatic deployment.
 
 ## Current status
 
-M0, M1, M1.5, and M2 are implemented. Bare `erka` opens a local keyboard-first
+M0, M1, M1.5, M2, and M3 are implemented. Bare `erka` opens a local keyboard-first
 conversation UI with live model output, durable follow-up queues, conversation
 restore, activity and diff views, session-only permission elevation,
 cancellation, and explicit interrupted-write recovery. `erka run` uses the same
@@ -230,6 +293,11 @@ and review through native DeepSeek and OpenAI connections. Stage checkpoints,
 fallback attempts, token/cost accounting, and restart state are durable. The
 standard suite includes headless TUI and two-provider protocol fixtures and
 makes no network requests; a live DeepSeek fixture remains opt-in.
+
+Optional Codex and OpenCode subscription bridges provide bounded read-only
+planning/review stages, canonical checkpoint translation, capability and login
+reporting, and deterministic fallback. Codex device authentication is delegated
+to the official CLI; erka never handles the resulting ChatGPT credentials.
 
 The server/API is planned for M4, and browser access is planned for M5. No web
 UI or background daemon is included today.

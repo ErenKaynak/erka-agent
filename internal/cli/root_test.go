@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	keyring "github.com/zalando/go-keyring"
+
+	"github.com/ErenKaynak/erka-agent/internal/auth"
 	"github.com/ErenKaynak/erka-agent/internal/buildinfo"
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
@@ -50,10 +53,30 @@ func TestExecuteHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("Execute() code = %d, want 0; stderr = %q", code, stderr)
 	}
-	for _, fragment := range []string{"Usage:", "run", "version", "--config", "--state-dir", "--pipeline"} {
+	for _, fragment := range []string{"Usage:", "auth", "providers", "run", "version", "--config", "--state-dir", "--pipeline"} {
 		if !strings.Contains(stdout, fragment) {
 			t.Errorf("Execute() help missing %q:\n%s", fragment, stdout)
 		}
+	}
+}
+
+func TestAuthAndProviderCommandsExposeM3Surface(t *testing.T) {
+	t.Parallel()
+	stdout, stderr, code := executeForTest(t, "auth", "--help")
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "login") || !strings.Contains(stdout, "status") {
+		t.Fatalf("auth help = %d, %q, %q", code, stdout, stderr)
+	}
+	_, stderr, code = executeForTest(t, "auth", "login")
+	if code != 2 || !strings.Contains(stderr, "exactly one bridge") {
+		t.Fatalf("auth login usage = %d, %q", code, stderr)
+	}
+	_, stderr, code = executeForTest(t, "auth", "login", "--device", "opencode")
+	if code != 2 || !strings.Contains(stderr, "only supported for codex") {
+		t.Fatalf("auth login --device opencode = %d, %q", code, stderr)
+	}
+	stdout, stderr, code = executeForTest(t, "providers")
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "native") {
+		t.Fatalf("providers = %d, %q, %q", code, stdout, stderr)
 	}
 }
 
@@ -127,6 +150,7 @@ func TestExecuteRunPassesConfigFlagsToLoader(t *testing.T) {
 		"--provider", "deepseek",
 		"--model", "deepseek-v4-pro",
 		"--provider-base-url", "https://deepseek.example",
+		"--api-key-env", "MY_KEY",
 		"--pipeline", "alternate",
 		"run", "--max-iterations", "9", "--max-output-tokens", "2048", "--timeout", "2m", "--full",
 		"fix the tests",
@@ -134,7 +158,7 @@ func TestExecuteRunPassesConfigFlagsToLoader(t *testing.T) {
 	if code != 0 || stderr != "" {
 		t.Fatalf("Execute() code = %d, stderr = %q", code, stderr)
 	}
-	if got.ConfigPath != "/config.yaml" || got.StateDir != "/state" || got.Provider != "deepseek" || got.Model != "deepseek-v4-pro" || got.BaseURL != "https://deepseek.example" || got.Pipeline != "alternate" || got.MaxIterations != 9 || got.MaxOutputTokens != 2048 || got.StageTimeout != 2*time.Minute || !got.AllowFullExecution {
+	if got.ConfigPath != "/config.yaml" || got.StateDir != "/state" || got.Provider != "deepseek" || got.Model != "deepseek-v4-pro" || got.BaseURL != "https://deepseek.example" || got.APIKeyEnv != "MY_KEY" || got.Pipeline != "alternate" || got.MaxIterations != 9 || got.MaxOutputTokens != 2048 || got.StageTimeout != 2*time.Minute || !got.AllowFullExecution {
 		t.Fatalf("config options = %#v", got)
 	}
 }
@@ -151,13 +175,42 @@ func TestExecuteRunResumeDoesNotRequirePrompt(t *testing.T) {
 	}
 }
 
+func TestExecuteRunStageTimeoutAlias(t *testing.T) {
+	t.Parallel()
+
+	var got config.Options
+	_, stderr, code := executeForTestWithLoader(
+		t,
+		func(_ context.Context, options config.Options) (config.Resolved, error) {
+			got = options
+			return config.Resolved{}, nil
+		},
+		"run", "--stage-timeout", "90s", "fix the tests",
+	)
+	if code != 0 || stderr != "" {
+		t.Fatalf("Execute() code = %d, stderr = %q", code, stderr)
+	}
+	if got.StageTimeout != 90*time.Second {
+		t.Fatalf("config options = %#v", got)
+	}
+}
+
 func TestRunConfiguredRequiresCredential(t *testing.T) {
-	t.Setenv("TEST_ERKA_MISSING_KEY", "")
+	previous := newAuthManager
+	newAuthManager = func() *auth.Manager { return auth.NewManager(emptyKeyring{}) }
+	t.Cleanup(func() { newAuthManager = previous })
+
 	err := runConfigured(context.Background(), config.Resolved{APIKeyEnv: "TEST_ERKA_MISSING_KEY"}, "fix", "", "", io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "TEST_ERKA_MISSING_KEY") {
 		t.Fatalf("runConfigured() error = %v", err)
 	}
 }
+
+type emptyKeyring struct{}
+
+func (emptyKeyring) Get(string, string) (string, error) { return "", keyring.ErrNotFound }
+func (emptyKeyring) Set(string, string, string) error   { return nil }
+func (emptyKeyring) Delete(string, string) error        { return nil }
 
 func TestExecuteRunReportsConfigFailure(t *testing.T) {
 	t.Parallel()

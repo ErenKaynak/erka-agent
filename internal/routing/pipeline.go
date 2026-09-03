@@ -12,7 +12,7 @@ import (
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 )
 
-type BackendFactory func(context.Context, Candidate, Stage, erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error)
+type BackendFactory func(context.Context, Candidate, Stage, erkaruntime.NativeLimits) (erkaruntime.StageBackend, error)
 
 type PipelineEngine struct {
 	Config  config.Resolved
@@ -213,7 +213,7 @@ func (engine *PipelineEngine) executeStage(ctx context.Context, request Pipeline
 			_ = engine.failTask(ctx, request.TaskID, run.ID, "provider_open_failed", wrapped)
 			return stageAttempt{Run: run}, wrapped
 		}
-		capabilities, capabilityErr := backend.Provider.Capabilities(ctx)
+		capabilities, capabilityErr := backend.Capabilities(ctx)
 		if capabilityErr == nil {
 			capabilityErr = Eligible(route, candidate, capabilities)
 		}
@@ -264,7 +264,7 @@ func (engine *PipelineEngine) createRun(ctx context.Context, taskID erkaruntime.
 		return erkaruntime.Run{}, err
 	}
 	now := engine.Clock().UTC()
-	run := erkaruntime.Run{ID: erkaruntime.RunID(id), TaskID: taskID, Stage: string(stage), BackendClass: "native", Connection: candidate.Connection, Provider: candidate.Provider, Model: candidate.Model, Attempt: attempt, Status: erkaruntime.RunQueued, CreatedAt: now, UpdatedAt: now}
+	run := erkaruntime.Run{ID: erkaruntime.RunID(id), TaskID: taskID, Stage: string(stage), BackendClass: candidate.BackendClass, Connection: candidate.Connection, Provider: candidate.Provider, Model: candidate.Model, Attempt: attempt, Status: erkaruntime.RunQueued, CreatedAt: now, UpdatedAt: now}
 	return run, engine.Store.CreateRun(ctx, run)
 }
 
