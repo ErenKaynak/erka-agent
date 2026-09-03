@@ -88,6 +88,9 @@ func (memory *Memory) CreateRun(ctx context.Context, run erkaruntime.Run) error 
 	if _, exists := memory.runs[run.ID]; exists {
 		return fmt.Errorf("run %q: %w", run.ID, erkaruntime.ErrAlreadyExists)
 	}
+	if run.Attempt == 0 {
+		run.Attempt = 1
+	}
 	memory.runs[run.ID] = run
 	return nil
 }
@@ -202,6 +205,10 @@ func (memory *Memory) Commit(ctx context.Context, request erkaruntime.CommitRequ
 	if err := rejectDuplicateIDs(memory.items[request.TaskID], memory.events[request.TaskID], request); err != nil {
 		return erkaruntime.CommittedBatch{}, err
 	}
+	updatedRuns, err := memory.updatedRunMetadata(request.Items)
+	if err != nil {
+		return erkaruntime.CommittedBatch{}, err
+	}
 
 	items := cloneItems(request.Items)
 	events := cloneEvents(request.Events)
@@ -218,15 +225,49 @@ func (memory *Memory) Commit(ctx context.Context, request erkaruntime.CommitRequ
 	}
 	memory.tasks[request.TaskID] = task
 	if request.RunTransition != nil {
-		run := memory.runs[request.RunTransition.RunID]
+		run, ok := updatedRuns[request.RunTransition.RunID]
+		if !ok {
+			run = memory.runs[request.RunTransition.RunID]
+		}
 		run.Status = request.RunTransition.To
-		memory.runs[run.ID] = run
+		updatedRuns[run.ID] = run
+	}
+	for id, run := range updatedRuns {
+		memory.runs[id] = run
 	}
 
 	return erkaruntime.CommittedBatch{
 		TaskID: request.TaskID, LastItemSequence: task.LastItemSequence,
 		LastEventSequence: task.LastEventSequence, Events: cloneEvents(events),
 	}, nil
+}
+
+func (memory *Memory) updatedRunMetadata(items []erkaruntime.RuntimeItem) (map[erkaruntime.RunID]erkaruntime.Run, error) {
+	updated := make(map[erkaruntime.RunID]erkaruntime.Run)
+	for _, item := range items {
+		run, ok := updated[item.RunID]
+		if !ok {
+			run = memory.runs[item.RunID]
+		}
+		switch item.Kind {
+		case erkaruntime.ItemUsage:
+			if run.Usage.Currency != "" && item.Usage.Currency != "" && run.Usage.Currency != item.Usage.Currency {
+				return nil, fmt.Errorf("run %q usage currency changed from %q to %q", item.RunID, run.Usage.Currency, item.Usage.Currency)
+			}
+			run.Usage.InputTokens += item.Usage.InputTokens
+			run.Usage.OutputTokens += item.Usage.OutputTokens
+			run.Usage.CacheReadTokens += item.Usage.CacheReadTokens
+			run.Usage.CacheWriteTokens += item.Usage.CacheWriteTokens
+			run.Usage.CostMicrounits += item.Usage.CostMicrounits
+			if run.Usage.Currency == "" {
+				run.Usage.Currency = item.Usage.Currency
+			}
+		case erkaruntime.ItemError:
+			run.FailureCode = item.Error.Code
+		}
+		updated[item.RunID] = run
+	}
+	return updated, nil
 }
 
 func (memory *Memory) validateRunReferences(request erkaruntime.CommitRequest) error {

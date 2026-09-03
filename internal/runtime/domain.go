@@ -37,6 +37,7 @@ type Task struct {
 	ID        TaskID
 	ProjectID ProjectID
 	Objective string
+	Pipeline  string
 	Status    TaskStatus
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -79,9 +80,13 @@ type Run struct {
 	TaskID       TaskID
 	Stage        string
 	BackendClass string
+	Connection   string
 	Provider     string
 	Model        string
+	Attempt      int
 	Status       RunStatus
+	Usage        Usage
+	FailureCode  string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -95,6 +100,12 @@ func (run Run) Validate() error {
 	}
 	if run.Status != RunQueued {
 		return errors.New("new run must be queued")
+	}
+	if run.Attempt < 0 {
+		return errors.New("run attempt must not be negative")
+	}
+	if err := run.Usage.Validate(); err != nil {
+		return fmt.Errorf("run usage: %w", err)
 	}
 	if run.CreatedAt.IsZero() || run.UpdatedAt.IsZero() {
 		return errors.New("run creation and update times are required")

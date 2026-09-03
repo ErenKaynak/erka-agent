@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,45 @@ func TestConversationMigrationBackfillsM1Task(t *testing.T) {
 	turns, err := db.ListTurns(ctx, "task-old")
 	if err != nil || len(turns) != 1 || turns[0].Prompt != "old prompt" || turns[0].RunID != "run-old" || turns[0].Status != TurnCompleted {
 		t.Fatalf("backfill = %#v, %v", turns, err)
+	}
+	run, err := db.LoadRun(ctx, "run-old")
+	if err != nil || run.Attempt != 1 || run.Connection != "" || run.Usage != (erkaruntime.Usage{}) {
+		t.Fatalf("M2 run backfill = %#v, %v", run, err)
+	}
+	task, err := db.LoadTask(ctx, "task-old")
+	if err != nil || task.Pipeline != "" {
+		t.Fatalf("M2 task backfill = %#v, %v", task, err)
+	}
+}
+
+func TestRunAccountingIsUpdatedAtomicallyFromCanonicalItems(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "erka.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	seedSQLite(t, ctx, db, now)
+	_, err = db.Commit(ctx, erkaruntime.CommitRequest{TaskID: "task-1", Items: []erkaruntime.RuntimeItem{
+		{ID: "usage-1", TaskID: "task-1", RunID: "run-1", Sequence: 1, Kind: erkaruntime.ItemUsage, Time: now, Usage: &erkaruntime.Usage{InputTokens: 11, OutputTokens: 7, CacheReadTokens: 3, CostMicrounits: 19, Currency: "USD"}},
+		{ID: "error-1", TaskID: "task-1", RunID: "run-1", Sequence: 2, Kind: erkaruntime.ItemError, Time: now, Error: &erkaruntime.RuntimeError{Code: "rate_limited", Message: "retry later", Retryable: true}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.LoadRun(ctx, "run-1")
+	if err != nil || run.Usage.InputTokens != 11 || run.Usage.OutputTokens != 7 || run.Usage.CacheReadTokens != 3 || run.Usage.CostMicrounits != 19 || run.Usage.Currency != "USD" || run.FailureCode != "rate_limited" {
+		t.Fatalf("run accounting = %#v, %v", run, err)
+	}
+	_, err = db.Commit(ctx, erkaruntime.CommitRequest{TaskID: "task-1", ExpectedItemSequence: 2, Items: []erkaruntime.RuntimeItem{{ID: "usage-2", TaskID: "task-1", RunID: "run-1", Sequence: 3, Kind: erkaruntime.ItemUsage, Time: now, Usage: &erkaruntime.Usage{CostMicrounits: 1, Currency: "EUR"}}}})
+	if err == nil || !strings.Contains(err.Error(), "currency changed") {
+		t.Fatalf("currency mismatch error = %v", err)
+	}
+	task, err := db.LoadTask(ctx, "task-1")
+	if err != nil || task.LastItemSequence != 2 {
+		t.Fatalf("mismatch rollback task = %#v, %v", task, err)
 	}
 }
 

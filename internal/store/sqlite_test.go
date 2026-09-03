@@ -90,7 +90,7 @@ func TestSQLiteMigratesPersistsAndReopens(t *testing.T) {
 		t.Fatalf("LoadEvents() = %#v, %v", events, err)
 	}
 	snapshot, err := reopened.LoadTask(ctx, "task-1")
-	if err != nil || snapshot.Status != erkaruntime.TaskCoding || snapshot.LastItemSequence != 2 || snapshot.Objective != "fix tests" {
+	if err != nil || snapshot.Status != erkaruntime.TaskCoding || snapshot.LastItemSequence != 2 || snapshot.Objective != "fix tests" || snapshot.Pipeline != "default" {
 		t.Fatalf("LoadTask() = %#v, %v", snapshot, err)
 	}
 	project, err := reopened.LoadProject(ctx, snapshot.ProjectID)
@@ -98,7 +98,7 @@ func TestSQLiteMigratesPersistsAndReopens(t *testing.T) {
 		t.Fatalf("LoadProject() = %#v, %v", project, err)
 	}
 	run, err := reopened.LoadRun(ctx, "run-1")
-	if err != nil || !run.CreatedAt.Equal(now) || run.Status != erkaruntime.RunRunning {
+	if err != nil || !run.CreatedAt.Equal(now) || run.Status != erkaruntime.RunRunning || run.Connection != "scripted-main" || run.Attempt != 2 {
 		t.Fatalf("LoadRun() = %#v, %v", run, err)
 	}
 
@@ -296,14 +296,14 @@ func seedSQLite(t *testing.T, ctx context.Context, database *SQLite, now time.Ti
 	}
 	task := erkaruntime.Task{
 		ID: "task-1", ProjectID: project.ID, Objective: "fix tests",
-		Status: erkaruntime.TaskQueued, CreatedAt: now, UpdatedAt: now,
+		Pipeline: "default", Status: erkaruntime.TaskQueued, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := database.CreateTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
 	run := erkaruntime.Run{
 		ID: "run-1", TaskID: task.ID, Stage: "coding", BackendClass: "native",
-		Provider: "scripted", Model: "fixture", Status: erkaruntime.RunQueued,
+		Connection: "scripted-main", Provider: "scripted", Model: "fixture", Attempt: 2, Status: erkaruntime.RunQueued,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := database.CreateRun(ctx, run); err != nil {

@@ -136,9 +136,9 @@ func (store *SQLite) CreateTask(ctx context.Context, task erkaruntime.Task) erro
 		return err
 	}
 	_, err := store.db.ExecContext(ctx, `
-		INSERT INTO tasks(id, project_id, objective, status, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?)`,
-		task.ID, task.ProjectID, task.Objective, task.Status,
+		INSERT INTO tasks(id, project_id, objective, pipeline, status, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		task.ID, task.ProjectID, task.Objective, task.Pipeline, task.Status,
 		formatTime(task.CreatedAt), formatTime(task.UpdatedAt),
 	)
 	return mapInsertError(err, "task", string(task.ID))
@@ -153,11 +153,16 @@ func (store *SQLite) CreateRun(ctx context.Context, run erkaruntime.Run) error {
 	}
 	_, err := store.db.ExecContext(ctx, `
 		INSERT INTO runs(
-			id, task_id, stage, backend_class, provider, model, status,
+			id, task_id, stage, backend_class, connection, provider, model, attempt,
+			status, input_tokens, output_tokens, cache_read_tokens,
+			cache_write_tokens, cost_microunits, currency, failure_code,
 			created_at, updated_at
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.ID, run.TaskID, run.Stage, run.BackendClass, run.Provider, run.Model,
-		run.Status, formatTime(run.CreatedAt), formatTime(run.UpdatedAt),
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.TaskID, run.Stage, run.BackendClass, run.Connection,
+		run.Provider, run.Model, normalizedAttempt(run.Attempt), run.Status,
+		run.Usage.InputTokens, run.Usage.OutputTokens, run.Usage.CacheReadTokens,
+		run.Usage.CacheWriteTokens, run.Usage.CostMicrounits, run.Usage.Currency,
+		run.FailureCode, formatTime(run.CreatedAt), formatTime(run.UpdatedAt),
 	)
 	return mapInsertError(err, "run", string(run.ID))
 }
@@ -191,11 +196,11 @@ func (store *SQLite) LoadTask(ctx context.Context, taskID erkaruntime.TaskID) (e
 	var snapshot erkaruntime.TaskSnapshot
 	var status, createdAt, updatedAt string
 	err := store.db.QueryRowContext(ctx, `
-		SELECT id, project_id, objective, status, created_at, updated_at,
+		SELECT id, project_id, objective, pipeline, status, created_at, updated_at,
 		       item_sequence, event_sequence
 		FROM tasks WHERE id = ?`, taskID,
 	).Scan(
-		&snapshot.ID, &snapshot.ProjectID, &snapshot.Objective, &status,
+		&snapshot.ID, &snapshot.ProjectID, &snapshot.Objective, &snapshot.Pipeline, &status,
 		&createdAt, &updatedAt, &snapshot.LastItemSequence, &snapshot.LastEventSequence,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -221,12 +226,17 @@ func (store *SQLite) LoadRun(ctx context.Context, runID erkaruntime.RunID) (erka
 	var run erkaruntime.Run
 	var status, createdAt, updatedAt string
 	err := store.db.QueryRowContext(ctx, `
-		SELECT id, task_id, stage, backend_class, provider, model, status,
+		SELECT id, task_id, stage, backend_class, connection, provider, model,
+		       attempt, status, input_tokens, output_tokens, cache_read_tokens,
+		       cache_write_tokens, cost_microunits, currency, failure_code,
 		       created_at, updated_at
 		FROM runs WHERE id = ?`, runID,
 	).Scan(
-		&run.ID, &run.TaskID, &run.Stage, &run.BackendClass, &run.Provider,
-		&run.Model, &status, &createdAt, &updatedAt,
+		&run.ID, &run.TaskID, &run.Stage, &run.BackendClass, &run.Connection,
+		&run.Provider, &run.Model, &run.Attempt, &status,
+		&run.Usage.InputTokens, &run.Usage.OutputTokens, &run.Usage.CacheReadTokens,
+		&run.Usage.CacheWriteTokens, &run.Usage.CostMicrounits, &run.Usage.Currency,
+		&run.FailureCode, &createdAt, &updatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return erkaruntime.Run{}, fmt.Errorf("run %q: %w", runID, erkaruntime.ErrNotFound)
@@ -363,6 +373,9 @@ func (store *SQLite) Commit(ctx context.Context, request erkaruntime.CommitReque
 		}
 	}
 	if err := insertItemsTx(ctx, tx, request.Items); err != nil {
+		return batch, err
+	}
+	if err := updateRunMetadataTx(ctx, tx, request.Items); err != nil {
 		return batch, err
 	}
 	if err := insertEventsTx(ctx, tx, request.Events); err != nil {
@@ -565,6 +578,65 @@ func insertItemsTx(ctx context.Context, tx *sql.Tx, items []erkaruntime.RuntimeI
 	return nil
 }
 
+func updateRunMetadataTx(ctx context.Context, tx *sql.Tx, items []erkaruntime.RuntimeItem) error {
+	type metadata struct {
+		usage       erkaruntime.Usage
+		failureCode string
+	}
+	byRun := make(map[erkaruntime.RunID]metadata)
+	for _, item := range items {
+		value := byRun[item.RunID]
+		switch item.Kind {
+		case erkaruntime.ItemUsage:
+			value.usage.InputTokens += item.Usage.InputTokens
+			value.usage.OutputTokens += item.Usage.OutputTokens
+			value.usage.CacheReadTokens += item.Usage.CacheReadTokens
+			value.usage.CacheWriteTokens += item.Usage.CacheWriteTokens
+			value.usage.CostMicrounits += item.Usage.CostMicrounits
+			if value.usage.Currency == "" {
+				value.usage.Currency = item.Usage.Currency
+			} else if item.Usage.Currency != "" && value.usage.Currency != item.Usage.Currency {
+				return fmt.Errorf("run %q usage currency changed from %q to %q", item.RunID, value.usage.Currency, item.Usage.Currency)
+			}
+		case erkaruntime.ItemError:
+			value.failureCode = item.Error.Code
+		}
+		byRun[item.RunID] = value
+	}
+	for runID, value := range byRun {
+		if value.usage == (erkaruntime.Usage{}) && value.failureCode == "" {
+			continue
+		}
+		var currentCurrency string
+		if err := tx.QueryRowContext(ctx, `SELECT currency FROM runs WHERE id = ?`, runID).Scan(&currentCurrency); err != nil {
+			return fmt.Errorf("load run %q accounting: %w", runID, err)
+		}
+		if currentCurrency != "" && value.usage.Currency != "" && currentCurrency != value.usage.Currency {
+			return fmt.Errorf("run %q usage currency changed from %q to %q", runID, currentCurrency, value.usage.Currency)
+		}
+		currency := currentCurrency
+		if currency == "" {
+			currency = value.usage.Currency
+		}
+		_, err := tx.ExecContext(ctx, `
+			UPDATE runs SET
+				input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
+				cache_read_tokens = cache_read_tokens + ?, cache_write_tokens = cache_write_tokens + ?,
+				cost_microunits = cost_microunits + ?, currency = ?,
+				failure_code = CASE WHEN ? = '' THEN failure_code ELSE ? END
+			WHERE id = ?`,
+			value.usage.InputTokens, value.usage.OutputTokens,
+			value.usage.CacheReadTokens, value.usage.CacheWriteTokens,
+			value.usage.CostMicrounits, currency,
+			value.failureCode, value.failureCode, runID,
+		)
+		if err != nil {
+			return fmt.Errorf("update run %q accounting: %w", runID, err)
+		}
+	}
+	return nil
+}
+
 func insertEventsTx(ctx context.Context, tx *sql.Tx, events []erkaruntime.Event) error {
 	for _, event := range events {
 		var runID any
@@ -686,5 +758,12 @@ func isConstraintError(err error) bool {
 func formatTime(value time.Time) string { return value.UTC().Format(timestampLayout) }
 
 func parseTime(value string) (time.Time, error) { return time.Parse(timestampLayout, value) }
+
+func normalizedAttempt(attempt int) int {
+	if attempt == 0 {
+		return 1
+	}
+	return attempt
+}
 
 var _ erkaruntime.Store = (*SQLite)(nil)

@@ -140,6 +140,22 @@ func TestMemoryCopiesMutablePayloads(t *testing.T) {
 	}
 }
 
+func TestMemoryAccumulatesRunUsage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	memory := NewMemory()
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	seedMemory(t, ctx, memory, now)
+	item := erkaruntime.RuntimeItem{ID: "usage-1", Sequence: 1, TaskID: "task-1", RunID: "run-1", Kind: erkaruntime.ItemUsage, Time: now, Usage: &erkaruntime.Usage{InputTokens: 5, OutputTokens: 2, CostMicrounits: 7, Currency: "USD"}}
+	if _, err := memory.Commit(ctx, erkaruntime.CommitRequest{TaskID: "task-1", Items: []erkaruntime.RuntimeItem{item}}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := memory.LoadRun(ctx, "run-1")
+	if err != nil || run.Attempt != 1 || run.Usage.InputTokens != 5 || run.Usage.OutputTokens != 2 || run.Usage.CostMicrounits != 7 || run.Usage.Currency != "USD" {
+		t.Fatalf("run = %#v, %v", run, err)
+	}
+}
+
 func TestMemoryHonorsCancellation(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())

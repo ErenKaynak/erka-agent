@@ -191,7 +191,7 @@ func (store *SQLite) ClaimNextTurn(ctx context.Context, projectID erkaruntime.Pr
 	if err := erkaruntime.ValidateRun(run); err != nil {
 		return Turn{}, false, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, task_id, stage, backend_class, provider, model, status, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, run.ID, run.TaskID, run.Stage, run.BackendClass, run.Provider, run.Model, run.Status, formatTime(run.CreatedAt), formatTime(run.UpdatedAt))
+	_, err = tx.ExecContext(ctx, `INSERT INTO runs(id, task_id, stage, backend_class, connection, provider, model, attempt, status, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_microunits, currency, failure_code, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, run.ID, run.TaskID, run.Stage, run.BackendClass, run.Connection, run.Provider, run.Model, normalizedAttempt(run.Attempt), run.Status, run.Usage.InputTokens, run.Usage.OutputTokens, run.Usage.CacheReadTokens, run.Usage.CacheWriteTokens, run.Usage.CostMicrounits, run.Usage.Currency, run.FailureCode, formatTime(run.CreatedAt), formatTime(run.UpdatedAt))
 	if err != nil {
 		return Turn{}, false, mapInsertError(err, "run", string(run.ID))
 	}
