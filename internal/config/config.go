@@ -23,6 +23,7 @@ const (
 	DefaultProvider       = "deepseek"
 	DefaultModel          = "deepseek-v4-flash"
 	DefaultDeepSeekURL    = "https://api.deepseek.com"
+	DefaultOpenAIURL      = "https://api.openai.com"
 	DefaultAPIKeyEnv      = "ERKA_DEEPSEEK_API_KEY"
 	DefaultMaxIterations  = 24
 	DefaultMaxOutputToken = int64(8192)
@@ -63,6 +64,48 @@ type Resolved struct {
 	MaxOutputTokens    int64
 	StageTimeout       time.Duration
 	AllowFullExecution bool
+	ActivePipeline     string
+	Connections        map[string]Connection
+	Pipelines          map[string]Pipeline
+}
+
+// Connection names one native provider endpoint and its non-secret model
+// metadata. Credentials are referenced by environment variable name and are
+// resolved by the trusted credential layer.
+type Connection struct {
+	Provider  string                 `yaml:"provider"`
+	BaseURL   string                 `yaml:"base_url,omitempty"`
+	APIKeyEnv string                 `yaml:"api_key_env,omitempty"`
+	Models    map[string]ModelConfig `yaml:"models,omitempty"`
+}
+
+type ModelConfig struct {
+	Capabilities                   []string `yaml:"capabilities,omitempty"`
+	ContextTokens                  int64    `yaml:"context_tokens,omitempty"`
+	InputCostPerMillionMicrounits  int64    `yaml:"input_cost_per_million_microunits,omitempty"`
+	OutputCostPerMillionMicrounits int64    `yaml:"output_cost_per_million_microunits,omitempty"`
+	Currency                       string   `yaml:"currency,omitempty"`
+}
+
+type Pipeline struct {
+	Routing           string                `yaml:"routing"`
+	MaxRepairAttempts int                   `yaml:"max_repair_attempts,omitempty"`
+	Stages            map[string]StageRoute `yaml:"stages"`
+}
+
+type StageRoute struct {
+	Candidates           []string `yaml:"candidates"`
+	RequiredCapabilities []string `yaml:"required_capabilities,omitempty"`
+	Budget               Budget   `yaml:"budget,omitempty"`
+}
+
+type Budget struct {
+	MaxInputTokens    int64  `yaml:"max_input_tokens,omitempty"`
+	MaxOutputTokens   int64  `yaml:"max_output_tokens,omitempty"`
+	MaxIterations     int    `yaml:"max_iterations,omitempty"`
+	Timeout           string `yaml:"timeout,omitempty"`
+	MaxCostMicrounits int64  `yaml:"max_cost_microunits,omitempty"`
+	Currency          string `yaml:"currency,omitempty"`
 }
 
 // Options supplies command flags and injectable operating-system dependencies.
@@ -74,6 +117,7 @@ type Options struct {
 	Model      string
 	BaseURL    string
 	APIKeyEnv  string
+	Pipeline   string
 
 	MaxIterations      int
 	MaxOutputTokens    int64
@@ -87,9 +131,12 @@ type Options struct {
 }
 
 type fileConfig struct {
-	Version  int    `yaml:"version"`
-	StateDir string `yaml:"state_dir,omitempty"`
-	Provider struct {
+	Version     int                   `yaml:"version"`
+	StateDir    string                `yaml:"state_dir,omitempty"`
+	Pipeline    string                `yaml:"pipeline,omitempty"`
+	Connections map[string]Connection `yaml:"connections,omitempty"`
+	Pipelines   map[string]Pipeline   `yaml:"pipelines,omitempty"`
+	Provider    struct {
 		Type      string `yaml:"type,omitempty"`
 		Model     string `yaml:"model,omitempty"`
 		BaseURL   string `yaml:"base_url,omitempty"`
@@ -183,8 +230,11 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 			if parseErr != nil {
 				return Resolved{}, fmt.Errorf("load config %q: parse runtime.stage_timeout: %w", resolved.ConfigPath, parseErr)
 			}
-			resolved.AllowFullExecution = loaded.Permissions.AllowFullExecution
 		}
+		resolved.AllowFullExecution = loaded.Permissions.AllowFullExecution
+		resolved.ActivePipeline = loaded.Pipeline
+		resolved.Connections = loaded.Connections
+		resolved.Pipelines = loaded.Pipelines
 	case errors.Is(readErr, fs.ErrNotExist) && !explicitConfig:
 		// A default config file is optional.
 	case readErr != nil:
@@ -200,6 +250,9 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 	applyStringEnv(options.LookupEnv, "ERKA_DEEPSEEK_BASE_URL", &resolved.BaseURL, &resolved.BaseURLSource)
 	if value, ok := nonEmptyEnv(options.LookupEnv, "ERKA_API_KEY_ENV"); ok {
 		resolved.APIKeyEnv = value
+	}
+	if value, ok := nonEmptyEnv(options.LookupEnv, "ERKA_PIPELINE"); ok {
+		resolved.ActivePipeline = value
 	}
 	if err := applyIntEnv(options.LookupEnv, "ERKA_MAX_ITERATIONS", &resolved.MaxIterations); err != nil {
 		return Resolved{}, err
@@ -235,6 +288,9 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 	if options.APIKeyEnv != "" {
 		resolved.APIKeyEnv = options.APIKeyEnv
 	}
+	if options.Pipeline != "" {
+		resolved.ActivePipeline = options.Pipeline
+	}
 	if options.MaxIterations != 0 {
 		resolved.MaxIterations = options.MaxIterations
 	}
@@ -251,8 +307,16 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 	if !isPlatformAbs(options.GOOS, resolved.StateDir) {
 		return Resolved{}, fmt.Errorf("state directory must be absolute: %q", resolved.StateDir)
 	}
-	if resolved.Provider != "deepseek" {
+	if resolved.Provider != "deepseek" && resolved.Provider != "openai" {
 		return Resolved{}, fmt.Errorf("unsupported native provider %q", resolved.Provider)
+	}
+	if resolved.Provider == "openai" {
+		if resolved.BaseURLSource == SourceDefault {
+			resolved.BaseURL = DefaultOpenAIURL
+		}
+		if resolved.APIKeyEnv == DefaultAPIKeyEnv {
+			resolved.APIKeyEnv = "OPENAI_API_KEY"
+		}
 	}
 	if strings.TrimSpace(resolved.Model) == "" || strings.TrimSpace(resolved.APIKeyEnv) == "" {
 		return Resolved{}, errors.New("provider model and API key environment name must not be empty")
@@ -266,11 +330,135 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 	if resolved.MaxIterations <= 0 || resolved.MaxOutputTokens <= 0 || resolved.StageTimeout <= 0 {
 		return Resolved{}, errors.New("runtime limits must be positive")
 	}
+	if err := validateRouting(&resolved); err != nil {
+		return Resolved{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return Resolved{}, err
 	}
 
 	return resolved, nil
+}
+
+var supportedStages = map[string]bool{
+	"planning": true, "coding": true, "validation": true, "repair": true, "review": true,
+}
+
+var supportedCapabilities = map[string]bool{
+	"tools": true, "parallel_tools": true, "structured_output": true, "vision": true,
+}
+
+func validateRouting(resolved *Resolved) error {
+	for name, connection := range resolved.Connections {
+		if strings.TrimSpace(name) == "" || strings.Contains(name, "/") {
+			return fmt.Errorf("invalid connection name %q", name)
+		}
+		connection.Provider = strings.ToLower(strings.TrimSpace(connection.Provider))
+		if connection.Provider != "deepseek" && connection.Provider != "openai" {
+			return fmt.Errorf("connection %q uses unsupported native provider %q", name, connection.Provider)
+		}
+		if connection.BaseURL == "" {
+			if connection.Provider == "openai" {
+				connection.BaseURL = DefaultOpenAIURL
+			} else {
+				connection.BaseURL = DefaultDeepSeekURL
+			}
+		}
+		if connection.APIKeyEnv == "" {
+			if connection.Provider == "openai" {
+				connection.APIKeyEnv = "OPENAI_API_KEY"
+			} else {
+				connection.APIKeyEnv = DefaultAPIKeyEnv
+			}
+		}
+		if !validEnvironmentName(connection.APIKeyEnv) || credentialEnvironmentConflicts(connection.APIKeyEnv) {
+			return fmt.Errorf("connection %q has invalid API key environment %q", name, connection.APIKeyEnv)
+		}
+		for model, metadata := range connection.Models {
+			if strings.TrimSpace(model) == "" || metadata.ContextTokens < 0 || metadata.InputCostPerMillionMicrounits < 0 || metadata.OutputCostPerMillionMicrounits < 0 {
+				return fmt.Errorf("connection %q has invalid model metadata for %q", name, model)
+			}
+			if (metadata.InputCostPerMillionMicrounits > 0 || metadata.OutputCostPerMillionMicrounits > 0) && strings.TrimSpace(metadata.Currency) == "" {
+				return fmt.Errorf("connection %q model %q pricing requires a currency", name, model)
+			}
+			for _, capability := range metadata.Capabilities {
+				if !supportedCapabilities[capability] {
+					return fmt.Errorf("connection %q model %q has unsupported capability %q", name, model, capability)
+				}
+			}
+		}
+		resolved.Connections[name] = connection
+	}
+	if len(resolved.Pipelines) == 0 {
+		if resolved.ActivePipeline != "" {
+			return fmt.Errorf("pipeline %q is not configured", resolved.ActivePipeline)
+		}
+		return nil
+	}
+	if resolved.ActivePipeline == "" {
+		if _, ok := resolved.Pipelines["default"]; !ok {
+			return errors.New("pipeline must be selected when no default pipeline is configured")
+		}
+		resolved.ActivePipeline = "default"
+	}
+	if _, ok := resolved.Pipelines[resolved.ActivePipeline]; !ok {
+		return fmt.Errorf("pipeline %q is not configured", resolved.ActivePipeline)
+	}
+	for name, pipeline := range resolved.Pipelines {
+		if pipeline.Routing != "fixed" {
+			return fmt.Errorf("pipeline %q uses unsupported routing mode %q", name, pipeline.Routing)
+		}
+		if pipeline.MaxRepairAttempts < 0 {
+			return fmt.Errorf("pipeline %q has a negative repair-attempt limit", name)
+		}
+		for stage, route := range pipeline.Stages {
+			if !supportedStages[stage] {
+				return fmt.Errorf("pipeline %q has unsupported stage %q", name, stage)
+			}
+			if len(route.Candidates) == 0 {
+				return fmt.Errorf("pipeline %q stage %q has no candidates", name, stage)
+			}
+			for _, capability := range route.RequiredCapabilities {
+				if !supportedCapabilities[capability] {
+					return fmt.Errorf("pipeline %q stage %q requires unsupported capability %q", name, stage, capability)
+				}
+			}
+			if route.Budget.MaxInputTokens < 0 || route.Budget.MaxOutputTokens < 0 || route.Budget.MaxIterations < 0 || route.Budget.MaxCostMicrounits < 0 {
+				return fmt.Errorf("pipeline %q stage %q has a negative budget", name, stage)
+			}
+			if route.Budget.Timeout != "" {
+				value, err := time.ParseDuration(route.Budget.Timeout)
+				if err != nil || value <= 0 {
+					return fmt.Errorf("pipeline %q stage %q has invalid timeout %q", name, stage, route.Budget.Timeout)
+				}
+			}
+			if route.Budget.MaxCostMicrounits > 0 && strings.TrimSpace(route.Budget.Currency) == "" {
+				return fmt.Errorf("pipeline %q stage %q cost budget requires a currency", name, stage)
+			}
+			for _, candidate := range route.Candidates {
+				connectionName, model, ok := strings.Cut(candidate, "/")
+				if !ok || connectionName == "" || model == "" || strings.Contains(model, "/") {
+					return fmt.Errorf("pipeline %q stage %q has invalid candidate %q", name, stage, candidate)
+				}
+				connection, exists := resolved.Connections[connectionName]
+				if !exists {
+					return fmt.Errorf("pipeline %q stage %q references unknown connection %q", name, stage, connectionName)
+				}
+				if len(connection.Models) > 0 {
+					if _, exists := connection.Models[model]; !exists {
+						return fmt.Errorf("pipeline %q stage %q references unknown model %q on connection %q", name, stage, model, connectionName)
+					}
+				}
+			}
+		}
+		if _, ok := pipeline.Stages["planning"]; !ok {
+			return fmt.Errorf("pipeline %q requires a planning stage", name)
+		}
+		if _, ok := pipeline.Stages["coding"]; !ok {
+			return fmt.Errorf("pipeline %q requires a coding stage", name)
+		}
+	}
+	return nil
 }
 
 // DefaultPaths returns platform-standard config and state locations.

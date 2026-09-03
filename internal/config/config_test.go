@@ -205,6 +205,105 @@ permissions:
 	}
 }
 
+func TestLoadPipelineConnectionsAndBudgets(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yaml")
+	content := `version: 1
+pipeline: default
+connections:
+  planner:
+    provider: openai
+    models:
+      gpt-test:
+        capabilities: [tools, structured_output]
+        context_tokens: 128000
+        input_cost_per_million_microunits: 1000000
+        output_cost_per_million_microunits: 2000000
+        currency: USD
+  coder:
+    provider: deepseek
+    base_url: https://deepseek.example
+    api_key_env: CODER_KEY
+pipelines:
+  default:
+    routing: fixed
+    max_repair_attempts: 2
+    stages:
+      planning:
+        candidates: [planner/gpt-test]
+        required_capabilities: [structured_output]
+        budget:
+          max_input_tokens: 20000
+          max_output_tokens: 4000
+          max_iterations: 3
+          timeout: 5m
+          max_cost_microunits: 500000
+          currency: USD
+      coding:
+        candidates: [coder/deepseek-test]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(context.Background(), Options{ConfigPath: configPath, GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActivePipeline != "default" || len(got.Connections) != 2 || len(got.Pipelines) != 1 {
+		t.Fatalf("resolved routing = %#v", got)
+	}
+	if got.Connections["planner"].BaseURL != DefaultOpenAIURL || got.Connections["planner"].APIKeyEnv != "OPENAI_API_KEY" {
+		t.Fatalf("planner defaults = %#v", got.Connections["planner"])
+	}
+	budget := got.Pipelines["default"].Stages["planning"].Budget
+	if budget.MaxInputTokens != 20000 || budget.MaxOutputTokens != 4000 || budget.MaxIterations != 3 || budget.Timeout != "5m" || budget.MaxCostMicrounits != 500000 || budget.Currency != "USD" {
+		t.Fatalf("planning budget = %#v", budget)
+	}
+}
+
+func TestLoadPipelineSelectionPrecedence(t *testing.T) {
+	t.Parallel()
+	content := []byte(`version: 1
+connections:
+  native:
+    provider: deepseek
+pipelines:
+  default:
+    routing: fixed
+    stages:
+      planning: {candidates: [native/planner]}
+      coding: {candidates: [native/coder]}
+  alternate:
+    routing: fixed
+    stages:
+      planning: {candidates: [native/planner]}
+      coding: {candidates: [native/coder]}
+`)
+	got, err := Load(context.Background(), Options{
+		Pipeline: "alternate", GOOS: "linux", HomeDir: "/home/erka",
+		LookupEnv: lookup(map[string]string{"ERKA_PIPELINE": "default"}),
+		ReadFile:  func(string) ([]byte, error) { return content, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActivePipeline != "alternate" {
+		t.Fatalf("active pipeline = %q", got.ActivePipeline)
+	}
+}
+
+func TestLoadDefaultsLegacyOpenAIProvider(t *testing.T) {
+	t.Parallel()
+	got, err := Load(context.Background(), Options{Provider: "openai", GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil), ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BaseURL != DefaultOpenAIURL || got.APIKeyEnv != "OPENAI_API_KEY" {
+		t.Fatalf("OpenAI defaults = %#v", got)
+	}
+}
+
 func TestLoadRejectsMissingExplicitConfig(t *testing.T) {
 	t.Parallel()
 
@@ -240,6 +339,9 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 		{name: "negative limit", content: "version: 1\nruntime:\n  max_iterations: -1\n", want: "runtime limits must be positive"},
 		{name: "invalid key environment", content: "version: 1\nprovider:\n  api_key_env: BAD-NAME\n", want: "invalid API key environment"},
 		{name: "leaky key environment", content: "version: 1\nprovider:\n  api_key_env: PATH\n", want: "general subprocess variable"},
+		{name: "missing pipeline connection", content: "version: 1\npipelines:\n  default:\n    routing: fixed\n    stages:\n      planning: {candidates: [missing/model]}\n      coding: {candidates: [missing/model]}\n", want: "unknown connection"},
+		{name: "unsupported routing", content: "version: 1\nconnections:\n  native: {provider: deepseek}\npipelines:\n  default:\n    routing: llm\n    stages:\n      planning: {candidates: [native/model]}\n      coding: {candidates: [native/model]}\n", want: "unsupported routing mode"},
+		{name: "invalid stage budget", content: "version: 1\nconnections:\n  native: {provider: deepseek}\npipelines:\n  default:\n    routing: fixed\n    stages:\n      planning: {candidates: [native/model], budget: {timeout: never}}\n      coding: {candidates: [native/model]}\n", want: "invalid timeout"},
 	}
 
 	for _, test := range tests {
