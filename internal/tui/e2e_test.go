@@ -105,7 +105,7 @@ func TestHeadlessInteractiveWorkflowQueuesRestoresAndKeepsSecretOutOfState(t *te
 		t.Fatalf("items/events = %d/%d/%d", users, assistants, len(conversation.Events))
 	}
 	contents, err := os.ReadFile(filepath.Join(root, "answer.txt"))
-	if err != nil || string(contents) != "new\n" {
+	if err != nil || strings.ReplaceAll(string(contents), "\r\n", "\n") != "new\n" {
 		t.Fatalf("answer = %q, %v", contents, err)
 	}
 	database, err := os.ReadFile(filepath.Join(state, "erka.db"))
