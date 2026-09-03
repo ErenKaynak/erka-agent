@@ -34,6 +34,26 @@ The initial keyboard map is:
 - `Ctrl+C`: confirm exit; queued prompts remain durable.
 - `?`: show keyboard help.
 
+Typing `/` in the composer shows matching local commands; press `Tab` to
+complete the first match. Commands are handled by the TUI and are never sent to
+the model:
+
+- `/help`: show keyboard and command help.
+- `/new`: start a new conversation.
+- `/sessions`: open the conversation picker.
+- `/open <task-id>`: open a conversation by its durable ID.
+- `/diff`: inspect the current working-tree diff.
+- `/permissions`: open the session permission confirmation.
+- `/full`: request full command execution with confirmation.
+- `/workspace`: immediately return to workspace-only execution.
+- `/cancel`: confirm cancellation of the active turn.
+- `/status`: show the current task, provider, state, and permission mode.
+- `/quit`: confirm exit.
+
+Use `//text` to send a model prompt that begins with a literal `/`. Help, diff,
+permission, recovery, cancellation, and exit dialogs are bounded to the current
+terminal viewport; `Esc` closes a dialog without acting.
+
 For scripts and one-shot use, `erka run` remains available:
 
 ```bash
