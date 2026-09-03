@@ -168,6 +168,10 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				model.active = true
 				return model, model.runNext()
 			}
+			if !model.active && hasActiveTurn(message.conversation.Turns) {
+				model.active = true
+				return model, model.resume()
+			}
 		}
 		return model, nil
 	case submittedMsg:
@@ -530,6 +534,15 @@ func errorText(err error) string {
 func hasQueuedTurn(turns []store.Turn) bool {
 	for _, turn := range turns {
 		if turn.Status == store.TurnQueued {
+			return true
+		}
+	}
+	return false
+}
+
+func hasActiveTurn(turns []store.Turn) bool {
+	for _, turn := range turns {
+		if turn.Status == store.TurnClaimed || turn.Status == store.TurnRunning {
 			return true
 		}
 	}

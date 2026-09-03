@@ -118,6 +118,8 @@ func key(value string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: '?', Text: "?"}
 	case "ctrl+p":
 		return tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl}
+	case "ctrl+d":
+		return tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}
 	case "y":
 		return tea.KeyPressMsg{Code: 'y', Text: "y"}
 	default:

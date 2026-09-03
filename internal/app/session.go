@@ -97,7 +97,11 @@ func OpenSession(ctx context.Context, options SessionOptions) (*Session, error) 
 
 func (session *Session) Root() string                     { return session.root }
 func (session *Session) ProjectID() erkaruntime.ProjectID { return session.project }
-func (session *Session) ReadOnly() bool                   { return session.readOnly }
+func (session *Session) ReadOnly() bool {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.readOnly
+}
 
 func (session *Session) Close() error {
 	session.mu.Lock()
@@ -148,7 +152,7 @@ func (session *Session) OpenConversation(ctx context.Context, taskID erkaruntime
 }
 
 func (session *Session) Submit(ctx context.Context, taskID erkaruntime.TaskID, prompt string) (erkaruntime.TaskID, error) {
-	if session.readOnly {
+	if session.ReadOnly() {
 		return "", errors.New("repository is read-only while another erka process holds the execution lease")
 	}
 	prompt = strings.TrimSpace(prompt)
@@ -189,7 +193,7 @@ func (session *Session) Submit(ctx context.Context, taskID erkaruntime.TaskID, p
 }
 
 func (session *Session) RunNext(ctx context.Context) (LocalResult, bool, error) {
-	if session.readOnly {
+	if session.ReadOnly() {
 		return LocalResult{}, false, errors.New("repository is read-only while another erka process holds the execution lease")
 	}
 	if session.options.Provider == nil {
@@ -198,7 +202,9 @@ func (session *Session) RunNext(ctx context.Context) (LocalResult, bool, error) 
 	now := session.options.Clock().UTC()
 	renewed, err := session.database.RenewLease(ctx, store.Lease{ProjectID: session.project, Holder: session.holder, UpdatedAt: now, ExpiresAt: now.Add(leaseDuration)})
 	if err != nil || !renewed {
+		session.mu.Lock()
 		session.readOnly = true
+		session.mu.Unlock()
 		if err == nil {
 			err = errors.New("repository execution lease was lost")
 		}
@@ -209,32 +215,11 @@ func (session *Session) RunNext(ctx context.Context) (LocalResult, bool, error) 
 		return LocalResult{}, false, err
 	}
 	run := erkaruntime.Run{ID: erkaruntime.RunID(value), Stage: "coding", BackendClass: "native", Provider: session.options.Provider.Name(), Model: session.options.Provider.Name(), Status: erkaruntime.RunQueued, CreatedAt: now, UpdatedAt: now}
-	tasks, err := session.database.ListTasks(ctx, session.project)
-	if err != nil {
-		return LocalResult{}, false, err
-	}
-	for _, task := range tasks {
-		turns, loadErr := session.database.ListTurns(ctx, task.ID)
-		if loadErr != nil {
-			return LocalResult{}, false, loadErr
-		}
-		for _, turn := range turns {
-			if turn.Status == store.TurnQueued {
-				run.TaskID = turn.TaskID
-				break
-			}
-		}
-		if run.TaskID != "" {
-			break
-		}
-	}
-	if run.TaskID == "" {
-		return LocalResult{}, false, nil
-	}
 	turn, ok, err := session.database.ClaimNextTurn(ctx, session.project, run, now)
 	if err != nil || !ok {
 		return LocalResult{}, ok, err
 	}
+	run.TaskID = turn.TaskID
 	return session.execute(ctx, turn, run)
 }
 
@@ -266,9 +251,12 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 	runCtx, cancel := context.WithCancel(ctx)
 	session.mu.Lock()
 	session.cancel = cancel
+	allowFullExecution := session.options.AllowFullExecution
 	session.mu.Unlock()
-	defer func() { session.mu.Lock(); session.cancel = nil; session.mu.Unlock(); cancel() }()
-	backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: session.options.AllowFullExecution}), Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
+	leaseDone := make(chan struct{})
+	go session.maintainLease(runCtx, cancel, leaseDone)
+	defer func() { close(leaseDone); session.mu.Lock(); session.cancel = nil; session.mu.Unlock(); cancel() }()
+	backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
 	stage, err := backend.RunStage(runCtx, erkaruntime.StageRequest{TaskID: turn.TaskID, RunID: run.ID, Objective: turn.Prompt}, session.database)
 	status := store.TurnCompleted
 	if errors.Is(err, erkaruntime.ErrUnknownMutatingToolOutcome) {
@@ -306,7 +294,34 @@ func (session *Session) Cancel() {
 	}
 }
 
-func (session *Session) SetFullExecution(enabled bool) { session.options.AllowFullExecution = enabled }
+func (session *Session) SetFullExecution(enabled bool) {
+	session.mu.Lock()
+	session.options.AllowFullExecution = enabled
+	session.mu.Unlock()
+}
+
+func (session *Session) maintainLease(ctx context.Context, cancel context.CancelFunc, done <-chan struct{}) {
+	ticker := time.NewTicker(leaseDuration / 3)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case <-ticker.C:
+			now := session.options.Clock().UTC()
+			ok, err := session.database.RenewLease(ctx, store.Lease{ProjectID: session.project, Holder: session.holder, UpdatedAt: now, ExpiresAt: now.Add(leaseDuration)})
+			if err != nil || !ok {
+				session.mu.Lock()
+				session.readOnly = true
+				session.mu.Unlock()
+				cancel()
+				return
+			}
+		}
+	}
+}
 
 func (session *Session) Diff(ctx context.Context) (string, error) {
 	result, err := session.sandbox.Run(ctx, erkaruntime.CommandRequest{Executable: "git", Arguments: []string{"diff", "--no-ext-diff", "--"}, Directory: ".", Timeout: 10 * time.Second, OutputLimitBytes: 1 << 20})

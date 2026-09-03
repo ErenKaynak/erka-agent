@@ -181,9 +181,13 @@ func (store *SQLite) ClaimNextTurn(ctx context.Context, projectID erkaruntime.Pr
 	if err != nil {
 		return Turn{}, false, err
 	}
-	if run.ID == "" || run.TaskID != turn.TaskID {
-		return Turn{}, false, errors.New("claimed run must identify the queued turn task")
+	if run.ID == "" {
+		return Turn{}, false, errors.New("claimed run requires an ID")
 	}
+	if run.TaskID != "" && run.TaskID != turn.TaskID {
+		return Turn{}, false, errors.New("claimed run identifies a different task")
+	}
+	run.TaskID = turn.TaskID
 	if err := erkaruntime.ValidateRun(run); err != nil {
 		return Turn{}, false, err
 	}
