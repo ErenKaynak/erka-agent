@@ -85,7 +85,10 @@ func (provider *Provider) Stream(ctx context.Context, request erkaruntime.ModelR
 	httpRequest.Header.Set("Accept", "text/event-stream")
 	response, err := provider.client.Do(httpRequest)
 	if err != nil {
-		return nil, fmt.Errorf("send DeepSeek request: %w", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &erkaruntime.ProviderError{Code: "connection_error", Message: "send DeepSeek request: " + err.Error(), Retryable: true}
 	}
 	if response.StatusCode != http.StatusOK {
 		defer response.Body.Close()
@@ -102,7 +105,7 @@ func (provider *Provider) Stream(ctx context.Context, request erkaruntime.ModelR
 		if message == "" {
 			message = http.StatusText(response.StatusCode)
 		}
-		return nil, fmt.Errorf("DeepSeek API returned %d: %s", response.StatusCode, message)
+		return nil, &erkaruntime.ProviderError{Code: fmt.Sprintf("http_%d", response.StatusCode), Message: message, Retryable: response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500}
 	}
 	contentType := response.Header.Get("Content-Type")
 	if !strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {

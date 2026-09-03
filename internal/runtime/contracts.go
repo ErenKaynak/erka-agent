@@ -120,6 +120,25 @@ type ModelProvider interface {
 	Stream(context.Context, ModelRequest) (ModelStream, error)
 }
 
+// ProviderError is a bounded, provider-neutral failure classification used by
+// deterministic routing. Message must never contain credentials or raw request
+// headers.
+type ProviderError struct {
+	Code      string
+	Message   string
+	Retryable bool
+}
+
+func (failure *ProviderError) Error() string {
+	if failure == nil {
+		return "model provider failed"
+	}
+	if failure.Code == "" {
+		return failure.Message
+	}
+	return failure.Code + ": " + failure.Message
+}
+
 type ModelStream interface {
 	Next(context.Context) (ModelOutput, error)
 	Close() error

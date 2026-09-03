@@ -258,6 +258,10 @@ func CanFallback(err error) bool {
 		}
 		err = stageFailure.Cause
 	}
+	var providerFailure *erkaruntime.ProviderError
+	if errors.As(err, &providerFailure) {
+		return providerFailure.Retryable
+	}
 	var failure *AttemptError
 	if !errors.As(err, &failure) || failure.AfterMutation {
 		return false

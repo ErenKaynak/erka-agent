@@ -394,7 +394,7 @@ func (backend *preparedBackend) readModelResponse(ctx context.Context, stage Sta
 			}
 			addUsage(response.usage, *output.Usage)
 		case ModelFailed:
-			return response, fmt.Errorf("provider %s: %s", output.Error.Code, output.Error.Message)
+			return response, &ProviderError{Code: output.Error.Code, Message: output.Error.Message, Retryable: output.Error.Retryable}
 		case ModelCompleted:
 			if response.byteCount > backend.Limits.MaxModelOutputBytes {
 				return response, fmt.Errorf("model output exceeds %d bytes", backend.Limits.MaxModelOutputBytes)

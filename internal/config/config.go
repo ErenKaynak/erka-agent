@@ -317,6 +317,9 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 		if resolved.APIKeyEnv == DefaultAPIKeyEnv {
 			resolved.APIKeyEnv = "OPENAI_API_KEY"
 		}
+		if resolved.ModelSource == SourceDefault {
+			return Resolved{}, errors.New("OpenAI provider requires an explicit model ID")
+		}
 	}
 	if strings.TrimSpace(resolved.Model) == "" || strings.TrimSpace(resolved.APIKeyEnv) == "" {
 		return Resolved{}, errors.New("provider model and API key environment name must not be empty")

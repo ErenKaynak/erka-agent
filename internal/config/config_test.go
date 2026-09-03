@@ -293,9 +293,9 @@ pipelines:
 	}
 }
 
-func TestLoadDefaultsLegacyOpenAIProvider(t *testing.T) {
+func TestLoadDefaultsLegacyOpenAIEndpoint(t *testing.T) {
 	t.Parallel()
-	got, err := Load(context.Background(), Options{Provider: "openai", GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil), ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }})
+	got, err := Load(context.Background(), Options{Provider: "openai", Model: "gpt-explicit", GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil), ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }})
 	if err != nil {
 		t.Fatal(err)
 	}
