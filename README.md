@@ -4,17 +4,41 @@
 It owns the agent loop, tools, context, sessions, routing, permissions, and event
 history while treating model vendors as interchangeable intelligence providers.
 
-The user-facing executable is `erka`. The current local workflow is:
+The user-facing executable is `erka`. Build it and launch the interactive TUI
+from any Git repository:
 
 ```bash
-# Build from this checkout.
 go build -o erka ./cmd/erka
+./erka
+```
 
-# Supply the native provider credential only through the environment.
+On first launch, erka asks for the DeepSeek API key in a masked terminal field
+and saves it in the operating-system credential store. If the credential store
+is unavailable, the key remains in memory for that process only. Environment
+credentials take precedence:
+
+```bash
+export ERKA_DEEPSEEK_API_KEY='your-key'
+./erka
+```
+
+The initial keyboard map is:
+
+- `Enter`: submit a prompt or durable follow-up.
+- `Alt+Enter` or `Shift+Enter`: insert a newline.
+- `Ctrl+O`: open the conversation picker.
+- `Ctrl+N`: start a new conversation.
+- `Ctrl+D`: inspect the working-tree diff.
+- `Ctrl+P`: confirm workspace/full execution for this process.
+- `Esc`: close an overlay or confirm cancellation of an active turn.
+- `Ctrl+C`: confirm exit; queued prompts remain durable.
+- `?`: show keyboard help.
+
+For scripts and one-shot use, `erka run` remains available:
+
+```bash
 export ERKA_DEEPSEEK_API_KEY='your-key'
 
-# Work directly in the current Git repository. --full explicitly permits the
-# model to run arbitrary child processes such as the project's test command.
 ./erka run --full "Fix the failing checkout tests"
 ```
 
@@ -22,7 +46,9 @@ Run the first task in a disposable repository and review its working-tree diff.
 Without `--full`, `erka` exposes the scoped read, search, patch, and Git
 inspection tools but does not expose arbitrary command execution.
 
-Each run prints its durable task ID before contacting the model. If the process
+Use `--cwd <path>` to select another repository and `--task <id>` to open a
+specific conversation in the TUI. Each scripted run prints its durable task ID
+before contacting the model. If the process
 is interrupted, restart it from the same repository with:
 
 ```bash
@@ -95,11 +121,14 @@ multi-user SaaS, distributed workers, or automatic deployment.
 
 ## Current status
 
-M0 is complete. The M1 local native vertical slice is implemented: `erka run`
-uses DeepSeek streaming, a durable SQLite transcript, seven bounded coding
-tools, explicit command-execution consent, and restart recovery. The standard
-test suite exercises the complete workflow with a scripted provider and makes
-no network requests; a live DeepSeek fixture is opt-in.
+M0, M1, and the M1.5 interactive terminal milestone are implemented. Bare
+`erka` opens a local keyboard-first conversation UI with live model output,
+durable follow-up queues, conversation restore, activity and diff views,
+session-only permission elevation, cancellation, and explicit interrupted-write
+recovery. `erka run` uses the same application/runtime core. DeepSeek streaming,
+SQLite state, and seven bounded coding tools remain the initial native vertical
+slice. The standard suite includes a headless two-turn TUI fixture and makes no
+network requests; a live DeepSeek fixture is opt-in.
 
 The server/API is planned for M4, and browser access is planned for M5. No web
 UI or background daemon is included today.
