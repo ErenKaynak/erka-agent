@@ -85,6 +85,25 @@ type diffMsg struct {
 }
 type resolvedMsg struct{ err error }
 
+type slashCommand struct {
+	name  string
+	usage string
+}
+
+var slashCommands = []slashCommand{
+	{name: "help", usage: "/help"},
+	{name: "new", usage: "/new"},
+	{name: "sessions", usage: "/sessions"},
+	{name: "open", usage: "/open <task-id>"},
+	{name: "diff", usage: "/diff"},
+	{name: "permissions", usage: "/permissions"},
+	{name: "full", usage: "/full"},
+	{name: "workspace", usage: "/workspace"},
+	{name: "cancel", usage: "/cancel"},
+	{name: "status", usage: "/status"},
+	{name: "quit", usage: "/quit"},
+}
+
 func NewModel(options Options) *Model {
 	ctx := options.Context
 	if ctx == nil {
@@ -254,15 +273,10 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return model, nil
 			}
 		case "ctrl+o":
-			model.overlay = "picker"
-			model.pickerIndex = 0
+			model.openPicker()
 			return model, nil
 		case "ctrl+n":
-			model.taskID = ""
-			model.conversation = app.Conversation{}
-			model.liveText = ""
-			model.status = "new conversation"
-			model.refresh()
+			model.newConversation()
 			return model, nil
 		case "ctrl+d":
 			return model, model.loadDiff()
@@ -277,12 +291,22 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "shift+enter", "alt+enter":
 			model.composer.InsertString("\n")
 			return model, nil
+		case "tab":
+			if completion := completeSlashCommand(model.composer.Value()); completion != "" {
+				model.composer.SetValue(completion)
+				return model, nil
+			}
 		case "enter":
 			prompt := strings.TrimSpace(model.composer.Value())
 			if prompt == "" {
 				return model, nil
 			}
 			model.composer.Reset()
+			if strings.HasPrefix(prompt, "//") {
+				prompt = strings.TrimPrefix(prompt, "/")
+			} else if strings.HasPrefix(prompt, "/") {
+				return model, model.runSlashCommand(prompt)
+			}
 			model.status = "queueing"
 			return model, model.submit(prompt)
 		}
@@ -322,9 +346,110 @@ func (model *Model) resolve(success bool) tea.Cmd {
 	}
 }
 
+func (model *Model) runSlashCommand(input string) tea.Cmd {
+	fields := strings.Fields(input)
+	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	requireNoArguments := func() bool {
+		if len(fields) == 1 {
+			return true
+		}
+		model.status = "usage: /" + name
+		return false
+	}
+	switch name {
+	case "help", "commands", "?":
+		if requireNoArguments() {
+			model.overlay = "help"
+		}
+	case "new":
+		if requireNoArguments() {
+			model.newConversation()
+		}
+	case "sessions", "conversations":
+		if requireNoArguments() {
+			model.openPicker()
+		}
+	case "open":
+		if len(fields) != 2 {
+			model.status = "usage: /open <task-id>"
+			return nil
+		}
+		if model.active && erkaruntime.TaskID(fields[1]) != model.taskID {
+			model.status = "cancel the active turn before opening another conversation"
+			return nil
+		}
+		model.taskID = erkaruntime.TaskID(fields[1])
+		model.overlay = ""
+		model.status = "opening conversation"
+		return model.load()
+	case "diff":
+		if requireNoArguments() {
+			model.status = "loading diff"
+			return model.loadDiff()
+		}
+	case "permissions":
+		if requireNoArguments() {
+			model.overlay = "permission"
+		}
+	case "full":
+		if !requireNoArguments() {
+			return nil
+		}
+		if model.full {
+			model.status = "full execution is already enabled"
+		} else {
+			model.overlay = "permission"
+		}
+	case "workspace":
+		if !requireNoArguments() {
+			return nil
+		}
+		model.full = false
+		model.controller.SetFullExecution(false)
+		model.status = "workspace-only execution enabled"
+	case "cancel":
+		if !requireNoArguments() {
+			return nil
+		}
+		if model.active {
+			model.overlay = "cancel"
+		} else {
+			model.status = "no active turn to cancel"
+		}
+	case "status":
+		if requireNoArguments() {
+			model.overlay = "status"
+		}
+	case "quit", "exit":
+		if requireNoArguments() {
+			model.confirmExit = true
+		}
+	default:
+		model.status = "unknown command /" + name + " — use /help"
+	}
+	return nil
+}
+
+func (model *Model) newConversation() {
+	if model.active {
+		model.status = "cancel the active turn before starting a new conversation"
+		return
+	}
+	model.taskID = ""
+	model.conversation = app.Conversation{}
+	model.liveText = ""
+	model.status = "new conversation"
+	model.refresh()
+}
+
+func (model *Model) openPicker() {
+	model.overlay = "picker"
+	model.pickerIndex = 0
+}
+
 func (model *Model) handleOverlay(key string) (tea.Model, tea.Cmd) {
 	switch model.overlay {
-	case "help", "diff":
+	case "help", "diff", "status":
 		if key == "esc" || (model.overlay == "help" && key == "?") {
 			model.overlay = ""
 		}
@@ -342,7 +467,13 @@ func (model *Model) handleOverlay(key string) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if len(model.conversations) > 0 {
-				model.taskID = model.conversations[model.pickerIndex].ID
+				selected := model.conversations[model.pickerIndex].ID
+				if model.active && selected != model.taskID {
+					model.overlay = ""
+					model.status = "cancel the active turn before switching conversations"
+					return model, nil
+				}
+				model.taskID = selected
 				model.overlay = ""
 				return model, model.load()
 			}
@@ -408,7 +539,11 @@ func (model *Model) render() string {
 	if model.width >= 110 {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(model.width-34).Render(body), lipgloss.NewStyle().Width(32).BorderLeft(true).PaddingLeft(1).Render(model.activity.View()))
 	}
-	footer := model.composer.View() + "\n" + muted.Render(model.status+"  Enter send · Alt+Enter newline · ? help · Ctrl+C quit")
+	footerStatus := model.status + "  Enter send · Alt+Enter newline · ? help · Ctrl+C quit"
+	if suggestions := slashCommandSuggestions(model.composer.Value(), 4); len(suggestions) > 0 {
+		footerStatus = "Commands: " + strings.Join(suggestions, " · ") + "  (Tab complete)"
+	}
+	footer := model.composer.View() + "\n" + muted.Render(footerStatus)
 	queued := 0
 	for _, turn := range model.conversation.Turns {
 		if turn.Status == store.TurnQueued {
@@ -423,7 +558,7 @@ func (model *Model) render() string {
 	}
 	result := header + "\n" + body + "\n" + footer
 	if model.overlay == "help" {
-		return overlay(model.width, model.height, "Keyboard", "Enter  submit\nAlt/Shift+Enter  newline\nCtrl+O  conversations\nCtrl+N  new conversation\nCtrl+D  diff\nCtrl+P  permissions\nEsc  cancel\nCtrl+C  exit\n?  close help")
+		return overlay(model.width, model.height, "Help", helpContents())
 	}
 	if model.overlay == "picker" {
 		var choices strings.Builder
@@ -458,6 +593,17 @@ func (model *Model) render() string {
 	}
 	if model.overlay == "recovery" {
 		return overlay(model.width, model.height, "Interrupted mutation", fmt.Sprintf("%s (%s) may have run before interruption.\n\n[s] record success  [f] record failure  [Esc] leave paused", Sanitize(model.unknown.Tool), Sanitize(string(model.unknown.CallID))))
+	}
+	if model.overlay == "status" {
+		task := string(model.taskID)
+		if task == "" {
+			task = "new conversation"
+		}
+		permission := "workspace"
+		if model.full {
+			permission = "full"
+		}
+		return overlay(model.width, model.height, "Session status", fmt.Sprintf("Task: %s\nState: %s\nProvider: %s/%s\nPermission: %s\nRead-only: %t\n\nEsc close", Sanitize(task), Sanitize(model.status), Sanitize(model.provider), Sanitize(model.model), permission, model.controller.ReadOnly()))
 	}
 	if model.confirmExit {
 		return overlay(model.width, model.height, "Exit erka?", "Cancel the active process and exit? Queued prompts remain durable. [y/N]")
@@ -542,7 +688,7 @@ func overlay(width, height int, title, contents string) string {
 	}
 	title = fitOverlayText(Sanitize(title), contentWidth, 1)
 	contents = fitOverlayText(Sanitize(contents), contentWidth, maxBodyLines)
-	box := lipgloss.NewStyle().Width(contentWidth).Border(lipgloss.RoundedBorder()).Padding(1, 2).Render(title + "\n\n" + contents)
+	box := lipgloss.NewStyle().Width(outerWidth).Border(lipgloss.RoundedBorder()).Padding(1, 2).Render(title + "\n\n" + contents)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -586,6 +732,53 @@ func fitOverlayText(value string, width, maxLines int) string {
 		lines[len(lines)-1] = string(last) + "…"
 	}
 	return strings.Join(lines, "\n")
+}
+
+func helpContents() string {
+	return "Keys\n" +
+		"Enter send · Alt+Enter newline\n" +
+		"Ctrl+O sessions · Ctrl+N new\n" +
+		"Ctrl+D diff · Ctrl+P permissions\n" +
+		"Esc cancel/close · Ctrl+C exit\n\n" +
+		"Slash commands\n" +
+		"/help /new /sessions /diff\n" +
+		"/open <task-id>\n" +
+		"/permissions /full /workspace\n" +
+		"/cancel /status /quit\n" +
+		"Tab completes · // sends literal /\n\n" +
+		"Esc or ? closes help"
+}
+
+func slashCommandSuggestions(value string, limit int) []string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || strings.Contains(value, "\n") {
+		return nil
+	}
+	prefix := strings.ToLower(strings.TrimPrefix(strings.Fields(value)[0], "/"))
+	result := make([]string, 0, limit)
+	for _, command := range slashCommands {
+		if strings.HasPrefix(command.name, prefix) {
+			result = append(result, command.usage)
+			if len(result) == limit {
+				break
+			}
+		}
+	}
+	return result
+}
+
+func completeSlashCommand(value string) string {
+	if strings.Contains(value, "\n") {
+		return ""
+	}
+	suggestions := slashCommandSuggestions(value, 1)
+	if len(suggestions) == 0 {
+		return ""
+	}
+	if strings.HasSuffix(suggestions[0], " <task-id>") {
+		return strings.TrimSuffix(suggestions[0], "<task-id>")
+	}
+	return suggestions[0]
 }
 func errorText(err error) string {
 	if err == nil {
