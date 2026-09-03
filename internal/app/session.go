@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ErenKaynak/erka-agent/internal/config"
+	"github.com/ErenKaynak/erka-agent/internal/routing"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 	"github.com/ErenKaynak/erka-agent/internal/sandbox"
 	"github.com/ErenKaynak/erka-agent/internal/store"
@@ -28,7 +30,11 @@ type SessionOptions struct {
 	Clock              func() time.Time
 	Limits             erkaruntime.NativeLimits
 	AllowFullExecution bool
+	Pipeline           config.Resolved
+	ProviderFactory    ProviderFactory
 }
+
+type ProviderFactory func(context.Context, routing.Candidate) (erkaruntime.ModelProvider, error)
 
 type Session struct {
 	mu       sync.Mutex
@@ -57,6 +63,9 @@ func OpenSession(ctx context.Context, options SessionOptions) (*Session, error) 
 	}
 	if !filepath.IsAbs(options.StateDir) {
 		return nil, errors.New("local session requires an absolute state directory")
+	}
+	if options.Pipeline.ActivePipeline != "" && options.ProviderFactory == nil {
+		return nil, errors.New("local pipeline session requires a provider factory")
 	}
 	root, err := DiscoverRepository(options.WorkingDirectory)
 	if err != nil {
@@ -166,7 +175,7 @@ func (session *Session) Submit(ctx context.Context, taskID erkaruntime.TaskID, p
 			return "", err
 		}
 		taskID = erkaruntime.TaskID(value)
-		task := erkaruntime.Task{ID: taskID, ProjectID: session.project, Objective: prompt, Status: erkaruntime.TaskQueued, CreatedAt: now, UpdatedAt: now}
+		task := erkaruntime.Task{ID: taskID, ProjectID: session.project, Objective: prompt, Pipeline: session.options.Pipeline.ActivePipeline, Status: erkaruntime.TaskQueued, CreatedAt: now, UpdatedAt: now}
 		if err := session.database.CreateTask(ctx, task); err != nil {
 			return "", err
 		}
@@ -177,6 +186,9 @@ func (session *Session) Submit(ctx context.Context, taskID erkaruntime.TaskID, p
 		}
 		if task.ProjectID != session.project {
 			return "", errors.New("conversation belongs to another repository")
+		}
+		if task.Pipeline != session.options.Pipeline.ActivePipeline {
+			return "", fmt.Errorf("conversation uses pipeline %q, current configuration selects %q", task.Pipeline, session.options.Pipeline.ActivePipeline)
 		}
 		if task.Status == erkaruntime.TaskWaiting {
 			return "", errors.New("conversation has an unresolved tool outcome")
@@ -196,7 +208,7 @@ func (session *Session) RunNext(ctx context.Context) (LocalResult, bool, error) 
 	if session.ReadOnly() {
 		return LocalResult{}, false, errors.New("repository is read-only while another erka process holds the execution lease")
 	}
-	if session.options.Provider == nil {
+	if session.options.Provider == nil && session.options.Pipeline.ActivePipeline == "" {
 		return LocalResult{}, false, errors.New("local session requires a model provider")
 	}
 	now := session.options.Clock().UTC()
@@ -210,17 +222,35 @@ func (session *Session) RunNext(ctx context.Context) (LocalResult, bool, error) 
 		}
 		return LocalResult{}, false, err
 	}
-	value, err := session.options.IDs.NewID("run")
+	run, err := session.newInitialRun(now)
 	if err != nil {
 		return LocalResult{}, false, err
 	}
-	run := erkaruntime.Run{ID: erkaruntime.RunID(value), Stage: "coding", BackendClass: "native", Provider: session.options.Provider.Name(), Model: session.options.Provider.Name(), Status: erkaruntime.RunQueued, CreatedAt: now, UpdatedAt: now}
-	turn, ok, err := session.database.ClaimNextTurn(ctx, session.project, run, now)
+	turn, ok, err := session.database.ClaimNextTurn(ctx, session.project, session.options.Pipeline.ActivePipeline, run, now)
 	if err != nil || !ok {
 		return LocalResult{}, ok, err
 	}
 	run.TaskID = turn.TaskID
-	return session.execute(ctx, turn, run)
+	return session.execute(ctx, turn, run, false)
+}
+
+func (session *Session) newInitialRun(now time.Time) (erkaruntime.Run, error) {
+	value, err := session.options.IDs.NewID("run")
+	if err != nil {
+		return erkaruntime.Run{}, err
+	}
+	run := erkaruntime.Run{ID: erkaruntime.RunID(value), Stage: "coding", BackendClass: "native", Status: erkaruntime.RunQueued, CreatedAt: now, UpdatedAt: now, Attempt: 1}
+	if session.options.Pipeline.ActivePipeline != "" {
+		route, err := routing.ResolveFixed(session.options.Pipeline, routing.StagePlanning, session.options.Limits)
+		if err != nil {
+			return erkaruntime.Run{}, err
+		}
+		candidate := route.Candidates[0]
+		run.Stage, run.Connection, run.Provider, run.Model = string(routing.StagePlanning), candidate.Connection, candidate.Provider, candidate.Model
+		return run, nil
+	}
+	run.Provider, run.Model = session.options.Provider.Name(), session.options.Provider.Name()
+	return run, nil
 }
 
 func (session *Session) Resume(ctx context.Context, taskID erkaruntime.TaskID) (LocalResult, error) {
@@ -231,20 +261,28 @@ func (session *Session) Resume(ctx context.Context, taskID erkaruntime.TaskID) (
 	if len(conversation.Runs) == 0 {
 		return LocalResult{}, errors.New("conversation has no run to resume")
 	}
+	if conversation.Task.Pipeline != session.options.Pipeline.ActivePipeline {
+		return LocalResult{}, fmt.Errorf("conversation uses pipeline %q, current configuration selects %q", conversation.Task.Pipeline, session.options.Pipeline.ActivePipeline)
+	}
 	run := conversation.Runs[len(conversation.Runs)-1]
 	prompt := conversation.Task.Objective
 	turn := store.Turn{TaskID: taskID, RunID: run.ID, Prompt: prompt, Status: store.TurnRunning}
+	if len(conversation.Turns) > 0 {
+		turn = conversation.Turns[len(conversation.Turns)-1]
+		prompt = turn.Prompt
+	}
 	for _, candidate := range conversation.Turns {
 		if candidate.RunID == run.ID {
 			turn = candidate
 			break
 		}
 	}
-	result, _, err := session.execute(ctx, turn, run)
+	turn.Prompt = prompt
+	result, _, err := session.execute(ctx, turn, run, session.options.Pipeline.ActivePipeline != "")
 	return result, err
 }
 
-func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaruntime.Run) (LocalResult, bool, error) {
+func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaruntime.Run, resumePipeline bool) (LocalResult, bool, error) {
 	if turn.ID != "" && turn.Status == store.TurnClaimed {
 		_ = session.database.UpdateTurnStatus(ctx, turn.ID, store.TurnClaimed, store.TurnRunning, session.options.Clock())
 	}
@@ -256,34 +294,79 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 	leaseDone := make(chan struct{})
 	go session.maintainLease(runCtx, cancel, leaseDone)
 	defer func() { close(leaseDone); session.mu.Lock(); session.cancel = nil; session.mu.Unlock(); cancel() }()
-	backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
-	stage, err := backend.RunStage(runCtx, erkaruntime.StageRequest{TaskID: turn.TaskID, RunID: run.ID, Objective: turn.Prompt}, session.database)
+	stage := erkaruntime.StageResult{}
+	activeRunID := run.ID
+	var err error
+	if session.options.Pipeline.ActivePipeline != "" {
+		engine := &routing.PipelineEngine{Config: session.options.Pipeline, Store: session.database, IDs: session.options.IDs, Clock: session.options.Clock, Limits: session.options.Limits}
+		engine.Factory = func(factoryCtx context.Context, candidate routing.Candidate, stageName routing.Stage, limits erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error) {
+			provider, openErr := session.options.ProviderFactory(factoryCtx, candidate)
+			if openErr != nil {
+				return nil, openErr
+			}
+			availableTools := stageTools(tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), stageName)
+			return &erkaruntime.NativeBackend{Provider: provider, Tools: availableTools, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
+		}
+		pipelineResult, pipelineErr := engine.Run(runCtx, routing.PipelineRequest{TaskID: turn.TaskID, Objective: turn.Prompt, InitialRun: run, Resume: resumePipeline})
+		activeRunID, err = pipelineResult.RunID, pipelineErr
+		stage = erkaruntime.StageResult{Checkpoint: pipelineResult.Checkpoint, Status: pipelineResult.Status}
+	} else {
+		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
+		stage, err = backend.RunStage(runCtx, erkaruntime.StageRequest{TaskID: turn.TaskID, RunID: run.ID, Objective: turn.Prompt}, session.database)
+	}
+	if activeRunID == "" {
+		activeRunID = run.ID
+	}
 	status := store.TurnCompleted
 	if errors.Is(err, erkaruntime.ErrUnknownMutatingToolOutcome) {
 		status = store.TurnWaiting
 	} else if errors.Is(err, context.Canceled) {
 		status = store.TurnCancelled
-		session.persistInterruption(turn.TaskID, run.ID, erkaruntime.TaskCancelled, erkaruntime.RunCancelled, "task.cancelled")
+		session.persistInterruption(turn.TaskID, activeRunID, erkaruntime.TaskCancelled, erkaruntime.RunCancelled, "task.cancelled")
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		status = store.TurnTimedOut
-		session.persistInterruption(turn.TaskID, run.ID, erkaruntime.TaskTimedOut, erkaruntime.RunTimedOut, "task.timed_out")
+		session.persistInterruption(turn.TaskID, activeRunID, erkaruntime.TaskTimedOut, erkaruntime.RunTimedOut, "task.timed_out")
 	} else if err != nil {
 		status = store.TurnFailed
 	}
 	if turn.ID != "" {
 		_ = session.database.UpdateTurnStatus(context.Background(), turn.ID, store.TurnRunning, status, session.options.Clock())
 	}
-	result := LocalResult{ProjectID: session.project, TaskID: turn.TaskID, RunID: run.ID, Status: stage.Status}
+	result := LocalResult{ProjectID: session.project, TaskID: turn.TaskID, RunID: activeRunID, Status: stage.Status}
 	if status == store.TurnCancelled {
 		result.Status = erkaruntime.TaskCancelled
 	}
 	if status == store.TurnTimedOut {
 		result.Status = erkaruntime.TaskTimedOut
 	}
-	if len(stage.Checkpoint.Decisions) > 0 {
-		result.Summary = stage.Checkpoint.Decisions[len(stage.Checkpoint.Decisions)-1]
-	}
+	result.Summary = checkpointSummary(stage.Checkpoint)
 	return result, true, err
+}
+
+func checkpointSummary(checkpoint erkaruntime.Checkpoint) string {
+	switch {
+	case len(checkpoint.Decisions) > 0:
+		return checkpoint.Decisions[len(checkpoint.Decisions)-1]
+	case len(checkpoint.ValidationResults) > 0:
+		return checkpoint.ValidationResults[len(checkpoint.ValidationResults)-1]
+	case checkpoint.DiffSummary != "":
+		return checkpoint.DiffSummary
+	default:
+		return checkpoint.ApprovedPlan
+	}
+}
+
+func stageTools(all []erkaruntime.Tool, stage routing.Stage) []erkaruntime.Tool {
+	if stage == routing.StageCoding || stage == routing.StageRepair {
+		return all
+	}
+	result := make([]erkaruntime.Tool, 0, len(all))
+	for _, tool := range all {
+		if !tool.Definition().Mutating {
+			result = append(result, tool)
+		}
+	}
+	return result
 }
 
 func (session *Session) Cancel() {

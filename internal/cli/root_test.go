@@ -50,7 +50,7 @@ func TestExecuteHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("Execute() code = %d, want 0; stderr = %q", code, stderr)
 	}
-	for _, fragment := range []string{"Usage:", "run", "version", "--config", "--state-dir"} {
+	for _, fragment := range []string{"Usage:", "run", "version", "--config", "--state-dir", "--pipeline"} {
 		if !strings.Contains(stdout, fragment) {
 			t.Errorf("Execute() help missing %q:\n%s", fragment, stdout)
 		}
@@ -127,13 +127,14 @@ func TestExecuteRunPassesConfigFlagsToLoader(t *testing.T) {
 		"--provider", "deepseek",
 		"--model", "deepseek-v4-pro",
 		"--provider-base-url", "https://deepseek.example",
+		"--pipeline", "alternate",
 		"run", "--max-iterations", "9", "--max-output-tokens", "2048", "--timeout", "2m", "--full",
 		"fix the tests",
 	)
 	if code != 0 || stderr != "" {
 		t.Fatalf("Execute() code = %d, stderr = %q", code, stderr)
 	}
-	if got.ConfigPath != "/config.yaml" || got.StateDir != "/state" || got.Provider != "deepseek" || got.Model != "deepseek-v4-pro" || got.BaseURL != "https://deepseek.example" || got.MaxIterations != 9 || got.MaxOutputTokens != 2048 || got.StageTimeout != 2*time.Minute || !got.AllowFullExecution {
+	if got.ConfigPath != "/config.yaml" || got.StateDir != "/state" || got.Provider != "deepseek" || got.Model != "deepseek-v4-pro" || got.BaseURL != "https://deepseek.example" || got.Pipeline != "alternate" || got.MaxIterations != 9 || got.MaxOutputTokens != 2048 || got.StageTimeout != 2*time.Minute || !got.AllowFullExecution {
 		t.Fatalf("config options = %#v", got)
 	}
 }

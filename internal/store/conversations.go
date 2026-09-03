@@ -164,7 +164,7 @@ func (store *SQLite) EnqueueTurn(ctx context.Context, turn Turn) error {
 	return tx.Commit()
 }
 
-func (store *SQLite) ClaimNextTurn(ctx context.Context, projectID erkaruntime.ProjectID, run erkaruntime.Run, now time.Time) (Turn, bool, error) {
+func (store *SQLite) ClaimNextTurn(ctx context.Context, projectID erkaruntime.ProjectID, pipeline string, run erkaruntime.Run, now time.Time) (Turn, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return Turn{}, false, err
 	}
@@ -173,7 +173,7 @@ func (store *SQLite) ClaimNextTurn(ctx context.Context, projectID erkaruntime.Pr
 		return Turn{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	row := tx.QueryRowContext(ctx, `SELECT turns.id, turns.task_id, turns.position, turns.prompt, turns.run_id, turns.status, turns.created_at, turns.updated_at FROM turns JOIN tasks ON tasks.id = turns.task_id WHERE tasks.project_id = ? AND turns.status = 'queued' ORDER BY turns.created_at, turns.position LIMIT 1`, projectID)
+	row := tx.QueryRowContext(ctx, `SELECT turns.id, turns.task_id, turns.position, turns.prompt, turns.run_id, turns.status, turns.created_at, turns.updated_at FROM turns JOIN tasks ON tasks.id = turns.task_id WHERE tasks.project_id = ? AND tasks.pipeline = ? AND turns.status = 'queued' ORDER BY turns.created_at, turns.position LIMIT 1`, projectID, pipeline)
 	turn, err := scanTurn(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Turn{}, false, nil

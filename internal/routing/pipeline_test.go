@@ -152,6 +152,48 @@ func TestPipelineRepairsFailedValidationAndRevalidates(t *testing.T) {
 	}
 }
 
+func TestPipelineResumeContinuesAfterCompletedPlanningRun(t *testing.T) {
+	t.Parallel()
+	memory, initial, ids, now := seededPipeline(t)
+	planner := &pipelineProvider{name: "openai", responses: [][]erkaruntime.ModelOutput{{
+		{Kind: erkaruntime.ModelTextDelta, Text: "Durable restart plan."},
+		{Kind: erkaruntime.ModelCompleted},
+	}}}
+	first := testPipelineEngine(memory, ids, now, pipelineConfig(), func(_ context.Context, _ Candidate, _ Stage, limits erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error) {
+		return &erkaruntime.NativeBackend{Provider: planner, Instructions: "pipeline", Limits: limits, IDs: ids, Clock: func() time.Time { return now }}, nil
+	})
+	attempt, err := first.executeStage(context.Background(), PipelineRequest{TaskID: "task-1", Objective: "fix checkout", InitialRun: initial}, StagePlanning, &initial, map[Stage]int{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedPlanning, err := memory.LoadRun(context.Background(), attempt.Run.ID)
+	if err != nil || completedPlanning.Status != erkaruntime.RunCompleted {
+		t.Fatalf("planning run = %#v, %v", completedPlanning, err)
+	}
+
+	coder := &pipelineProvider{name: "deepseek", responses: [][]erkaruntime.ModelOutput{{
+		{Kind: erkaruntime.ModelTextDelta, Text: "Resumed at coding."},
+		{Kind: erkaruntime.ModelCompleted},
+	}}}
+	resumed := testPipelineEngine(memory, ids, now, pipelineConfig(), func(_ context.Context, _ Candidate, stage Stage, limits erkaruntime.NativeLimits) (*erkaruntime.NativeBackend, error) {
+		if stage == StagePlanning {
+			return nil, errors.New("completed planning stage was replayed")
+		}
+		return &erkaruntime.NativeBackend{Provider: coder, Instructions: "pipeline", Limits: limits, IDs: ids, Clock: func() time.Time { return now }}, nil
+	})
+	result, err := resumed.Run(context.Background(), PipelineRequest{TaskID: "task-1", Objective: "fix checkout", InitialRun: completedPlanning, Resume: true})
+	if err != nil || result.Status != erkaruntime.TaskCompleted {
+		t.Fatalf("Run(resume) = %#v, %v", result, err)
+	}
+	if len(planner.Requests()) != 1 || len(coder.Requests()) != 1 {
+		t.Fatalf("planner requests=%d coder requests=%d", len(planner.Requests()), len(coder.Requests()))
+	}
+	codingRun, loadErr := memory.LoadRun(context.Background(), result.RunID)
+	if loadErr != nil || codingRun.ID == completedPlanning.ID || codingRun.Stage != "coding" || codingRun.Status != erkaruntime.RunCompleted {
+		t.Fatalf("coding run = %#v, %v", codingRun, loadErr)
+	}
+}
+
 func pipelineConfig() config.Resolved {
 	return config.Resolved{
 		ActivePipeline: "default",

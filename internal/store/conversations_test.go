@@ -107,7 +107,10 @@ func TestConversationQueueClaimsInOrderAndListsRuns(t *testing.T) {
 		t.Fatalf("turns = %#v, %v", turns, err)
 	}
 	run := erkaruntime.Run{ID: "run-2", TaskID: "task-1", Stage: "coding", BackendClass: "native", Provider: "fixture", Model: "fixture", Status: erkaruntime.RunQueued, CreatedAt: now.Add(3 * time.Second), UpdatedAt: now.Add(3 * time.Second)}
-	claimed, ok, err := db.ClaimNextTurn(ctx, "project-1", run, now.Add(3*time.Second))
+	if claimed, ok, err := db.ClaimNextTurn(ctx, "project-1", "another-pipeline", run, now.Add(3*time.Second)); err != nil || ok {
+		t.Fatalf("mismatched pipeline claim = %#v, %v, %v", claimed, ok, err)
+	}
+	claimed, ok, err := db.ClaimNextTurn(ctx, "project-1", "default", run, now.Add(3*time.Second))
 	if err != nil || !ok || claimed.Prompt != "follow one" {
 		t.Fatalf("claim = %#v, %v, %v", claimed, ok, err)
 	}

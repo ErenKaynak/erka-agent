@@ -27,6 +27,7 @@ type PipelineRequest struct {
 	TaskID     erkaruntime.TaskID
 	Objective  string
 	InitialRun erkaruntime.Run
+	Resume     bool
 }
 
 type PipelineResult struct {
@@ -56,52 +57,108 @@ func (engine *PipelineEngine) Run(ctx context.Context, request PipelineRequest) 
 		engine.Limits = erkaruntime.DefaultNativeLimits()
 	}
 
-	initial := request.InitialRun
+	pipeline := engine.Config.Pipelines[engine.Config.ActivePipeline]
 	attempts := make(map[Stage]int)
-	last, err := engine.executeStage(ctx, request, StagePlanning, &initial, attempts)
-	if err != nil {
-		return engine.result(ctx, request.TaskID, last), err
+	repairs := 0
+	var err error
+	if request.Resume {
+		attempts, repairs, err = engine.historyState(ctx, request.TaskID)
+		if err != nil {
+			return PipelineResult{}, err
+		}
 	}
-	last, err = engine.executeStage(ctx, request, StageCoding, nil, attempts)
-	if err != nil {
-		return engine.result(ctx, request.TaskID, last), err
+	stage := StagePlanning
+	initial := &request.InitialRun
+	var last stageAttempt
+	if request.Resume {
+		stage = Stage(request.InitialRun.Stage)
+		if !validStage(stage) {
+			return PipelineResult{}, fmt.Errorf("cannot resume unknown stage %q", stage)
+		}
+		switch request.InitialRun.Status {
+		case erkaruntime.RunCompleted:
+			checkpoint, loadErr := engine.checkpointForRun(ctx, request.TaskID, request.InitialRun.ID)
+			if loadErr != nil {
+				return PipelineResult{}, loadErr
+			}
+			last = stageAttempt{Run: request.InitialRun, Checkpoint: checkpoint}
+			initial = nil
+			stage, err = nextStage(pipeline, stage, checkpoint, repairs)
+		case erkaruntime.RunQueued, erkaruntime.RunRunning, erkaruntime.RunWaiting:
+			attempts[stage] = request.InitialRun.Attempt - 1
+		default:
+			return PipelineResult{}, fmt.Errorf("run %q cannot resume from status %q", request.InitialRun.ID, request.InitialRun.Status)
+		}
 	}
 
-	pipeline := engine.Config.Pipelines[engine.Config.ActivePipeline]
-	if _, configured := pipeline.Stages[string(StageValidation)]; configured {
-		last, err = engine.executeStage(ctx, request, StageValidation, nil, attempts)
+	for {
+		if errors.Is(err, errPipelineComplete) {
+			if last.Run.ID == "" {
+				return PipelineResult{}, errors.New("pipeline has no completed stage")
+			}
+			if completeErr := engine.completeTask(ctx, request.TaskID, last.Run.ID); completeErr != nil {
+				return engine.result(ctx, request.TaskID, last), completeErr
+			}
+			last.Status = erkaruntime.TaskCompleted
+			return engine.result(ctx, request.TaskID, last), nil
+		}
 		if err != nil {
-			return engine.result(ctx, request.TaskID, last), err
-		}
-		for repairs := 0; !validationPassed(last.Checkpoint) && repairs < pipeline.MaxRepairAttempts; repairs++ {
-			if _, configured := pipeline.Stages[string(StageRepair)]; !configured {
-				break
-			}
-			if last, err = engine.executeStage(ctx, request, StageRepair, nil, attempts); err != nil {
-				return engine.result(ctx, request.TaskID, last), err
-			}
-			if last, err = engine.executeStage(ctx, request, StageValidation, nil, attempts); err != nil {
-				return engine.result(ctx, request.TaskID, last), err
-			}
-		}
-		if !validationPassed(last.Checkpoint) {
-			err = errors.New("validation did not pass within the configured repair budget")
 			_ = engine.failTask(ctx, request.TaskID, last.Run.ID, "validation_failed", err)
 			return engine.result(ctx, request.TaskID, last), err
 		}
-	}
-
-	if _, configured := pipeline.Stages[string(StageReview)]; configured {
-		last, err = engine.executeStage(ctx, request, StageReview, nil, attempts)
+		last, err = engine.executeStage(ctx, request, stage, initial, attempts)
+		initial = nil
 		if err != nil {
 			return engine.result(ctx, request.TaskID, last), err
 		}
+		if stage == StageRepair {
+			repairs++
+		}
+		stage, err = nextStage(pipeline, stage, last.Checkpoint, repairs)
 	}
-	if err := engine.completeTask(ctx, request.TaskID, last.Run.ID); err != nil {
-		return engine.result(ctx, request.TaskID, last), err
+}
+
+var errPipelineComplete = errors.New("pipeline complete")
+
+func nextStage(pipeline config.Pipeline, current Stage, checkpoint erkaruntime.Checkpoint, repairs int) (Stage, error) {
+	switch current {
+	case StagePlanning:
+		return StageCoding, nil
+	case StageCoding:
+		if _, ok := pipeline.Stages[string(StageValidation)]; ok {
+			return StageValidation, nil
+		}
+		if _, ok := pipeline.Stages[string(StageReview)]; ok {
+			return StageReview, nil
+		}
+		return "", errPipelineComplete
+	case StageValidation:
+		if validationPassed(checkpoint) {
+			if _, ok := pipeline.Stages[string(StageReview)]; ok {
+				return StageReview, nil
+			}
+			return "", errPipelineComplete
+		}
+		if _, ok := pipeline.Stages[string(StageRepair)]; ok && repairs < pipeline.MaxRepairAttempts {
+			return StageRepair, nil
+		}
+		return "", errors.New("validation did not pass within the configured repair budget")
+	case StageRepair:
+		return StageValidation, nil
+	case StageReview:
+		return "", errPipelineComplete
+	default:
+		return "", fmt.Errorf("unknown pipeline stage %q", current)
 	}
-	last.Status = erkaruntime.TaskCompleted
-	return engine.result(ctx, request.TaskID, last), nil
+}
+
+func validStage(stage Stage) bool {
+	switch stage {
+	case StagePlanning, StageCoding, StageValidation, StageRepair, StageReview:
+		return true
+	default:
+		return false
+	}
 }
 
 type stageAttempt struct {
@@ -115,15 +172,26 @@ func (engine *PipelineEngine) executeStage(ctx context.Context, request Pipeline
 	if err != nil {
 		return stageAttempt{}, err
 	}
-	for index, candidate := range route.Candidates {
+	startIndex := 0
+	if initial != nil {
+		startIndex = -1
+		for index, candidate := range route.Candidates {
+			if initial.Stage == string(stage) && initial.Provider == candidate.Provider && initial.Model == candidate.Model && initial.Connection == candidate.Connection {
+				startIndex = index
+				break
+			}
+		}
+		if startIndex < 0 {
+			return stageAttempt{}, errors.New("initial pipeline run does not match its fixed route")
+		}
+	}
+	for index := startIndex; index < len(route.Candidates); index++ {
+		candidate := route.Candidates[index]
 		attempts[stage]++
 		attempt := attempts[stage]
 		var run erkaruntime.Run
-		if initial != nil && index == 0 {
+		if initial != nil && index == startIndex {
 			run = *initial
-			if run.Stage != string(stage) || run.Provider != candidate.Provider || run.Model != candidate.Model || run.Connection != candidate.Connection {
-				return stageAttempt{}, errors.New("initial pipeline run does not match the first fixed route")
-			}
 		} else {
 			run, err = engine.createRun(ctx, request.TaskID, stage, candidate, attempt)
 			if err != nil {
@@ -164,6 +232,9 @@ func (engine *PipelineEngine) executeStage(ctx context.Context, request Pipeline
 		result, runErr := backend.RunStage(ctx, erkaruntime.StageRequest{TaskID: request.TaskID, RunID: run.ID, Objective: request.Objective, Stage: stage, ContextMaxBytes: contextBytes}, engine.Store)
 		attemptResult := stageAttempt{Run: run, Checkpoint: result.Checkpoint, Status: result.Status}
 		if runErr != nil {
+			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, erkaruntime.ErrUnknownMutatingToolOutcome) {
+				return attemptResult, runErr
+			}
 			if index+1 < len(route.Candidates) && CanFallback(runErr) {
 				continue
 			}
@@ -195,6 +266,54 @@ func (engine *PipelineEngine) createRun(ctx context.Context, taskID erkaruntime.
 	now := engine.Clock().UTC()
 	run := erkaruntime.Run{ID: erkaruntime.RunID(id), TaskID: taskID, Stage: string(stage), BackendClass: "native", Connection: candidate.Connection, Provider: candidate.Provider, Model: candidate.Model, Attempt: attempt, Status: erkaruntime.RunQueued, CreatedAt: now, UpdatedAt: now}
 	return run, engine.Store.CreateRun(ctx, run)
+}
+
+func (engine *PipelineEngine) historyState(ctx context.Context, taskID erkaruntime.TaskID) (map[Stage]int, int, error) {
+	items, err := engine.Store.LoadItems(ctx, taskID, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	var turnStart uint64
+	for _, item := range items {
+		if item.Kind == erkaruntime.ItemUserMessage {
+			turnStart = item.Sequence
+		}
+	}
+	runIDs := make(map[erkaruntime.RunID]bool)
+	for _, item := range items {
+		if item.Sequence >= turnStart {
+			runIDs[item.RunID] = true
+		}
+	}
+	attempts := make(map[Stage]int)
+	repairs := 0
+	for runID := range runIDs {
+		run, loadErr := engine.Store.LoadRun(ctx, runID)
+		if loadErr != nil {
+			return nil, 0, loadErr
+		}
+		stage := Stage(run.Stage)
+		if run.Attempt > attempts[stage] {
+			attempts[stage] = run.Attempt
+		}
+		if stage == StageRepair && run.Status == erkaruntime.RunCompleted {
+			repairs++
+		}
+	}
+	return attempts, repairs, nil
+}
+
+func (engine *PipelineEngine) checkpointForRun(ctx context.Context, taskID erkaruntime.TaskID, runID erkaruntime.RunID) (erkaruntime.Checkpoint, error) {
+	items, err := engine.Store.LoadItems(ctx, taskID, 0)
+	if err != nil {
+		return erkaruntime.Checkpoint{}, err
+	}
+	for index := len(items) - 1; index >= 0; index-- {
+		if items[index].RunID == runID && items[index].Kind == erkaruntime.ItemCheckpoint {
+			return *items[index].Checkpoint, nil
+		}
+	}
+	return erkaruntime.Checkpoint{}, fmt.Errorf("completed run %q has no durable checkpoint", runID)
 }
 
 func (engine *PipelineEngine) completeStage(ctx context.Context, taskID erkaruntime.TaskID, runID erkaruntime.RunID, stage Stage, reported, priced erkaruntime.Usage) error {

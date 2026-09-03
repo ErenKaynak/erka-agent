@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ErenKaynak/erka-agent/internal/config"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 )
 
@@ -27,6 +28,8 @@ type LocalOptions struct {
 	Clock              func() time.Time
 	Limits             erkaruntime.NativeLimits
 	AllowFullExecution bool
+	Pipeline           config.Resolved
+	ProviderFactory    ProviderFactory
 }
 
 type LocalResult struct {
@@ -40,10 +43,10 @@ type LocalResult struct {
 // RunLocal creates or resumes one durable task and executes it directly in the
 // current repository. It starts no daemon or listener.
 func RunLocal(ctx context.Context, options LocalOptions) (LocalResult, error) {
-	if options.Provider == nil {
+	if options.Provider == nil && options.Pipeline.ActivePipeline == "" {
 		return LocalResult{}, errors.New("local run requires a model provider")
 	}
-	session, err := OpenSession(ctx, SessionOptions{WorkingDirectory: options.WorkingDirectory, StateDir: options.StateDir, Provider: options.Provider, Output: options.Output, IDs: options.IDs, Clock: options.Clock, Limits: options.Limits, AllowFullExecution: options.AllowFullExecution})
+	session, err := OpenSession(ctx, SessionOptions{WorkingDirectory: options.WorkingDirectory, StateDir: options.StateDir, Provider: options.Provider, Output: options.Output, IDs: options.IDs, Clock: options.Clock, Limits: options.Limits, AllowFullExecution: options.AllowFullExecution, Pipeline: options.Pipeline, ProviderFactory: options.ProviderFactory})
 	if err != nil {
 		return LocalResult{}, err
 	}

@@ -17,6 +17,8 @@ import (
 	"github.com/ErenKaynak/erka-agent/internal/buildinfo"
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	"github.com/ErenKaynak/erka-agent/internal/providers/deepseek"
+	"github.com/ErenKaynak/erka-agent/internal/providers/openai"
+	"github.com/ErenKaynak/erka-agent/internal/routing"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 	"github.com/ErenKaynak/erka-agent/internal/tui"
 )
@@ -91,6 +93,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	var workingDirectory string
 	var taskID string
 	var allowFullExecution bool
+	var pipeline string
 
 	root := &cobra.Command{
 		Use:           "erka",
@@ -105,7 +108,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 		},
 		RunE: func(command *cobra.Command, _ []string) error {
 			if interactive && launch != nil {
-				resolved, err := loadConfig(command.Context(), config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, AllowFullExecution: allowFullExecution})
+				resolved, err := loadConfig(command.Context(), config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, Pipeline: pipeline, AllowFullExecution: allowFullExecution})
 				if err != nil {
 					return fmt.Errorf("resolve configuration: %w", err)
 				}
@@ -128,6 +131,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	root.PersistentFlags().StringVar(&providerName, "provider", "", "native provider name (ERKA_PROVIDER)")
 	root.PersistentFlags().StringVar(&model, "model", "", "model ID (ERKA_MODEL)")
 	root.PersistentFlags().StringVar(&baseURL, "provider-base-url", "", "provider API base URL")
+	root.PersistentFlags().StringVar(&pipeline, "pipeline", "", "configured fixed pipeline (ERKA_PIPELINE)")
 	root.PersistentFlags().StringVar(
 		&stateDir,
 		"state-dir",
@@ -144,6 +148,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 			Provider:           providerName,
 			Model:              model,
 			BaseURL:            baseURL,
+			Pipeline:           pipeline,
 			MaxIterations:      limits.maxIterations,
 			MaxOutputTokens:    limits.maxOutputTokens,
 			StageTimeout:       limits.stageTimeout,
@@ -217,6 +222,19 @@ func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimi
 }
 
 func runConfigured(ctx context.Context, resolved config.Resolved, objective string, resume erkaruntime.TaskID, workingDirectory string, output io.Writer) error {
+	manager := auth.NewDefaultManager()
+	if resolved.ActivePipeline != "" {
+		factory := configuredProviderFactory(manager)
+		if workingDirectory == "" {
+			var err error
+			workingDirectory, err = os.Getwd()
+			if err != nil {
+				return fmt.Errorf("get working directory: %w", err)
+			}
+		}
+		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, Limits: nativeLimits(resolved)})
+		return err
+	}
 	providerName, baseURL := resolved.Provider, resolved.BaseURL
 	if providerName == "" {
 		providerName = "deepseek"
@@ -224,14 +242,14 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 	if baseURL == "" {
 		baseURL = deepseek.DefaultBaseURL
 	}
-	key, _, err := auth.NewDefaultManager().Resolve(ctx, providerName, baseURL, resolved.APIKeyEnv)
+	key, _, err := manager.Resolve(ctx, providerName, baseURL, resolved.APIKeyEnv)
 	if errors.Is(err, auth.ErrCredentialNotFound) {
-		return fmt.Errorf("DeepSeek credential is missing: set %s or launch interactive erka", resolved.APIKeyEnv)
+		return fmt.Errorf("%s credential is missing: set %s or launch interactive erka", providerName, resolved.APIKeyEnv)
 	}
 	if err != nil {
-		return fmt.Errorf("DeepSeek credential is missing: set %s or launch interactive erka (OS keyring unavailable: %w)", resolved.APIKeyEnv, err)
+		return fmt.Errorf("%s credential is missing: set %s or launch interactive erka (OS keyring unavailable: %w)", providerName, resolved.APIKeyEnv, err)
 	}
-	provider, err := deepseek.New(deepseek.Options{APIKey: key, BaseURL: resolved.BaseURL, Model: resolved.Model})
+	provider, err := openNativeProvider(providerName, baseURL, resolved.Model, key)
 	if err != nil {
 		return err
 	}
@@ -245,17 +263,40 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 		WorkingDirectory: workingDirectory, StateDir: resolved.StateDir,
 		Objective: objective, ResumeTaskID: resume, Provider: provider, Output: output,
 		AllowFullExecution: resolved.AllowFullExecution,
-		Limits: erkaruntime.NativeLimits{
-			MaxIterations: resolved.MaxIterations, MaxOutputTokens: resolved.MaxOutputTokens,
-			MaxModelOutputBytes: 1 << 20, MaxCumulativeToolOutputBytes: 4 << 20,
-			StageTimeout: resolved.StageTimeout,
-		},
+		Limits:             nativeLimits(resolved),
 	})
 	return err
 }
 
 func launchConfigured(ctx context.Context, resolved config.Resolved, options tuiLaunchOptions, input io.Reader, output io.Writer) error {
 	manager := auth.NewDefaultManager()
+	if resolved.ActivePipeline != "" {
+		if err := preparePipelineCredentials(ctx, resolved, manager, input, output); err != nil {
+			return err
+		}
+		workingDirectory := options.WorkingDirectory
+		var err error
+		if workingDirectory == "" {
+			workingDirectory, err = os.Getwd()
+			if err != nil {
+				return err
+			}
+		}
+		live := make(chan erkaruntime.LiveUpdate, 128)
+		observer := erkaruntime.LiveObserverFunc(func(_ context.Context, update erkaruntime.LiveUpdate) {
+			select {
+			case live <- update:
+			default:
+			}
+		})
+		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full})
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+		model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: "pipeline", Model: resolved.ActivePipeline, Branch: session.Branch(ctx), Full: options.Full, Live: live})
+		return tui.Run(model, input, output)
+	}
 	key, _, credentialErr := manager.Resolve(ctx, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
 	if credentialErr != nil {
 		key, credentialErr = tui.PromptCredential(ctx, input, output, resolved.Provider)
@@ -266,7 +307,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 			_, _ = fmt.Fprintf(output, "Warning: OS keyring unavailable; credential is in memory for this session only (%s).\n", source)
 		}
 	}
-	provider, err := deepseek.New(deepseek.Options{APIKey: key, BaseURL: resolved.BaseURL, Model: resolved.Model})
+	provider, err := openNativeProvider(resolved.Provider, resolved.BaseURL, resolved.Model, key)
 	if err != nil {
 		return err
 	}
@@ -284,13 +325,81 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 		default:
 		}
 	})
-	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, Observer: observer, Limits: erkaruntime.NativeLimits{MaxIterations: resolved.MaxIterations, MaxOutputTokens: resolved.MaxOutputTokens, MaxModelOutputBytes: 1 << 20, MaxCumulativeToolOutputBytes: 4 << 20, StageTimeout: resolved.StageTimeout}, AllowFullExecution: options.Full})
+	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full})
 	if err != nil {
 		return err
 	}
 	defer session.Close()
 	model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: resolved.Provider, Model: resolved.Model, Branch: session.Branch(ctx), Full: options.Full, Live: live})
 	return tui.Run(model, input, output)
+}
+
+func nativeLimits(resolved config.Resolved) erkaruntime.NativeLimits {
+	return erkaruntime.NativeLimits{MaxIterations: resolved.MaxIterations, MaxOutputTokens: resolved.MaxOutputTokens, MaxModelOutputBytes: 1 << 20, MaxCumulativeToolOutputBytes: 4 << 20, StageTimeout: resolved.StageTimeout}
+}
+
+func configuredProviderFactory(manager *auth.Manager) app.ProviderFactory {
+	return func(ctx context.Context, candidate routing.Candidate) (erkaruntime.ModelProvider, error) {
+		key, _, err := manager.Resolve(ctx, candidate.Provider, candidate.BaseURL, candidate.APIKeyEnv)
+		if err != nil {
+			kind := routing.FailureUnavailable
+			if !errors.Is(err, auth.ErrCredentialNotFound) {
+				kind = routing.FailureConnection
+			}
+			return nil, &routing.AttemptError{Kind: kind, Err: fmt.Errorf("connection %q credential: %w", candidate.Connection, err)}
+		}
+		provider, err := openNativeProvider(candidate.Provider, candidate.BaseURL, candidate.Model, key)
+		if err != nil {
+			return nil, &routing.AttemptError{Kind: routing.FailureInvalid, Err: err}
+		}
+		return provider, nil
+	}
+}
+
+func openNativeProvider(providerName, baseURL, model, key string) (erkaruntime.ModelProvider, error) {
+	switch providerName {
+	case "deepseek":
+		return deepseek.New(deepseek.Options{APIKey: key, BaseURL: baseURL, Model: model})
+	case "openai":
+		return openai.New(openai.Options{APIKey: key, BaseURL: baseURL, Model: model})
+	default:
+		return nil, fmt.Errorf("unsupported native provider %q", providerName)
+	}
+}
+
+func preparePipelineCredentials(ctx context.Context, resolved config.Resolved, manager *auth.Manager, input io.Reader, output io.Writer) error {
+	pipeline := resolved.Pipelines[resolved.ActivePipeline]
+	seen := make(map[string]bool)
+	for _, stage := range []routing.Stage{routing.StagePlanning, routing.StageCoding, routing.StageValidation, routing.StageRepair, routing.StageReview} {
+		if _, configured := pipeline.Stages[string(stage)]; !configured {
+			continue
+		}
+		route, err := routing.ResolveFixed(resolved, stage, nativeLimits(resolved))
+		if err != nil {
+			return err
+		}
+		for _, candidate := range route.Candidates {
+			account, err := auth.Account(candidate.Provider, candidate.BaseURL)
+			if err != nil {
+				return err
+			}
+			if seen[account] {
+				continue
+			}
+			seen[account] = true
+			if _, _, err = manager.Resolve(ctx, candidate.Provider, candidate.BaseURL, candidate.APIKeyEnv); err == nil {
+				continue
+			}
+			key, promptErr := tui.PromptCredential(ctx, input, output, candidate.Connection+" ("+candidate.Provider+")")
+			if promptErr != nil {
+				return promptErr
+			}
+			if source, saveErr := manager.Save(ctx, candidate.Provider, candidate.BaseURL, key); saveErr != nil {
+				_, _ = fmt.Fprintf(output, "Warning: OS keyring unavailable; credential is in memory for this session only (%s).\n", source)
+			}
+		}
+	}
+	return nil
 }
 
 func terminalReader(reader io.Reader) bool {
