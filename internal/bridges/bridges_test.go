@@ -1,6 +1,7 @@
 package bridges
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,14 @@ import (
 
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 )
+
+func TestMain(testingMain *testing.M) {
+	if mode := os.Getenv("GO_WANT_CODEX_CATALOG_HELPER"); mode != "" {
+		runCodexCatalogHelper(mode)
+		return
+	}
+	os.Exit(testingMain.Run())
+}
 
 func TestCodexBridgeUsesOfficialReadOnlyJSONContract(t *testing.T) {
 	t.Parallel()
@@ -92,6 +101,103 @@ func TestOpenCodeBridgeUsesDenyByDefaultPlanProfile(t *testing.T) {
 	if call.Environment["OPENCODE_DISABLE_PROJECT_CONFIG"] != "true" {
 		t.Fatal("project OpenCode configuration was not disabled")
 	}
+}
+
+func TestOpenCodeModelCatalogKeepsProviderQualifiedIDs(t *testing.T) {
+	t.Parallel()
+	runner := &scriptedRunner{results: []ProcessResult{
+		{ExitCode: 0, Stdout: "1.2.3\n"},
+		{ExitCode: 0, Stdout: "1 credentials\n"},
+		{ExitCode: 0, Stdout: "openai/gpt-5.6-sol\ndeepseek/deepseek-v4-pro\nopenai/gpt-5.6-sol\ninvalid\n"},
+	}}
+	models, err := NewOpenCode(OpenCodeOptions{Executable: "opencode-fixture", Runner: runner}).ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0].ID != "deepseek/deepseek-v4-pro" || models[1].ID != "openai/gpt-5.6-sol" {
+		t.Fatalf("models = %#v", models)
+	}
+	call := runner.Invocations()[2]
+	if strings.Join(call.Arguments, " ") != "models --pure" || call.OutputLimitBytes != 4<<20 {
+		t.Fatalf("invocation = %#v", call)
+	}
+}
+
+func TestCodexModelCatalogInitializesPaginatesAndIgnoresNotifications(t *testing.T) {
+	t.Parallel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, err := runCodexModelCatalog(context.Background(), executable, t.TempDir(), map[string]string{"GO_WANT_CODEX_CATALOG_HELPER": "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0].ID != "gpt-default" || !models[0].Default || models[1].ID != "gpt-other" || models[1].DisplayName != "Other" {
+		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestCodexModelCatalogRejectsMalformedProtocol(t *testing.T) {
+	t.Parallel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runCodexModelCatalog(context.Background(), executable, t.TempDir(), map[string]string{"GO_WANT_CODEX_CATALOG_HELPER": "malformed"})
+	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCodexModelCatalogPropagatesCancellation(t *testing.T) {
+	t.Parallel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err = runCodexModelCatalog(ctx, executable, t.TempDir(), map[string]string{"GO_WANT_CODEX_CATALOG_HELPER": "cancel"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func runCodexCatalogHelper(mode string) {
+	scanner := bufio.NewScanner(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	for scanner.Scan() {
+		var request struct {
+			ID     int `json:"id"`
+			Method string
+			Params struct {
+				Cursor string `json:"cursor"`
+			} `json:"params"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &request) != nil {
+			os.Exit(2)
+		}
+		switch request.Method {
+		case "initialize":
+			_ = encoder.Encode(map[string]any{"id": request.ID, "result": map[string]any{"userAgent": "fixture"}})
+		case "initialized":
+			if mode == "malformed" {
+				_, _ = os.Stdout.WriteString("not-json\n")
+			}
+		case "model/list":
+			if mode == "cancel" {
+				time.Sleep(time.Hour)
+			}
+			_ = encoder.Encode(map[string]any{"method": "account/updated", "params": map[string]any{}})
+			if request.Params.Cursor == "" {
+				_ = encoder.Encode(map[string]any{"id": request.ID, "result": map[string]any{"data": []map[string]any{{"id": "id-other", "model": "gpt-other", "displayName": "Other", "description": "fixture", "hidden": false, "isDefault": false}}, "nextCursor": "page-2"}})
+			} else {
+				_ = encoder.Encode(map[string]any{"id": request.ID, "result": map[string]any{"data": []map[string]any{{"id": "id-default", "model": "gpt-default", "displayName": "Default", "hidden": false, "isDefault": true}}, "nextCursor": nil}})
+			}
+		}
+	}
+	os.Exit(0)
 }
 
 func TestBridgeParsersRejectMalformedOrIncompleteStreams(t *testing.T) {

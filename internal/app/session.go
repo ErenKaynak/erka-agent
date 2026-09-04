@@ -33,22 +33,26 @@ type SessionOptions struct {
 	Pipeline           config.Resolved
 	ProviderFactory    ProviderFactory
 	BridgeFactory      BridgeFactory
+	RebuildProvider    func(string) (erkaruntime.ModelProvider, error)
+	NativeModel        string
 }
 
 type ProviderFactory func(context.Context, routing.Candidate) (erkaruntime.ModelProvider, error)
 type BridgeFactory func(context.Context, routing.Candidate) (erkaruntime.SubscriptionBridge, error)
 
 type Session struct {
-	mu       sync.Mutex
-	options  SessionOptions
-	root     string
-	project  erkaruntime.ProjectID
-	database *store.SQLite
-	sandbox  *sandbox.Local
-	holder   string
-	readOnly bool
-	closed   bool
-	cancel   context.CancelFunc
+	mu             sync.Mutex
+	options        SessionOptions
+	root           string
+	project        erkaruntime.ProjectID
+	database       *store.SQLite
+	sandbox        *sandbox.Local
+	holder         string
+	readOnly       bool
+	closed         bool
+	cancel         context.CancelFunc
+	turnActive     bool
+	modelOverrides map[erkaruntime.Stage]string
 }
 
 type Conversation struct {
@@ -216,6 +220,10 @@ func (session *Session) RunNext(ctx context.Context) (LocalResult, bool, error) 
 	if session.options.Provider == nil && session.options.Pipeline.ActivePipeline == "" {
 		return LocalResult{}, false, errors.New("local session requires a model provider")
 	}
+	if err := session.beginTurn(); err != nil {
+		return LocalResult{}, false, err
+	}
+	defer session.endTurn()
 	now := session.options.Clock().UTC()
 	renewed, err := session.database.RenewLease(ctx, store.Lease{ProjectID: session.project, Holder: session.holder, UpdatedAt: now, ExpiresAt: now.Add(leaseDuration)})
 	if err != nil || !renewed {
@@ -246,7 +254,7 @@ func (session *Session) newInitialRun(now time.Time) (erkaruntime.Run, error) {
 	}
 	run := erkaruntime.Run{ID: erkaruntime.RunID(value), Stage: "coding", BackendClass: "native", Status: erkaruntime.RunQueued, CreatedAt: now, UpdatedAt: now, Attempt: 1}
 	if session.options.Pipeline.ActivePipeline != "" {
-		route, err := routing.ResolveFixed(session.options.Pipeline, routing.StagePlanning, session.options.Limits)
+		route, err := routing.ResolveFixed(session.effectivePipeline(), routing.StagePlanning, session.options.Limits)
 		if err != nil {
 			return erkaruntime.Run{}, err
 		}
@@ -254,11 +262,19 @@ func (session *Session) newInitialRun(now time.Time) (erkaruntime.Run, error) {
 		run.Stage, run.BackendClass, run.Connection, run.Provider, run.Model = string(routing.StagePlanning), candidate.BackendClass, candidate.Connection, candidate.Provider, candidate.Model
 		return run, nil
 	}
-	run.Provider, run.Model = session.options.Provider.Name(), session.options.Provider.Name()
+	run.Provider = session.options.Provider.Name()
+	run.Model = strings.TrimSpace(session.options.NativeModel)
+	if run.Model == "" {
+		run.Model = run.Provider
+	}
 	return run, nil
 }
 
 func (session *Session) Resume(ctx context.Context, taskID erkaruntime.TaskID) (LocalResult, error) {
+	if err := session.beginTurn(); err != nil {
+		return LocalResult{}, err
+	}
+	defer session.endTurn()
 	conversation, err := session.OpenConversation(ctx, taskID)
 	if err != nil {
 		return LocalResult{}, err
@@ -303,7 +319,7 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 	activeRunID := run.ID
 	var err error
 	if session.options.Pipeline.ActivePipeline != "" {
-		engine := &routing.PipelineEngine{Config: session.options.Pipeline, Store: session.database, IDs: session.options.IDs, Clock: session.options.Clock, Limits: session.options.Limits}
+		engine := &routing.PipelineEngine{Config: session.effectivePipeline(), Store: session.database, IDs: session.options.IDs, Clock: session.options.Clock, Limits: session.options.Limits}
 		engine.Factory = func(factoryCtx context.Context, candidate routing.Candidate, stageName routing.Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
 			if candidate.BackendClass == config.ConnectionSubscriptionBridge {
 				bridge, openErr := session.options.BridgeFactory(factoryCtx, candidate)
@@ -409,6 +425,137 @@ func (session *Session) SetFullExecution(enabled bool) {
 	session.mu.Lock()
 	session.options.AllowFullExecution = enabled
 	session.mu.Unlock()
+}
+
+// SetModel changes one stage's primary connection/model route for subsequent
+// turns in this process. The configured route remains unchanged and continues
+// to supply deterministic fallbacks.
+func (session *Session) SetModel(selection erkaruntime.ModelSelection) error {
+	selection.Connection = strings.TrimSpace(selection.Connection)
+	selection.Model = strings.TrimSpace(selection.Model)
+	if err := (erkaruntime.ModelInfo{ID: selection.Model}).Validate(); err != nil {
+		return fmt.Errorf("invalid model selection: %w", err)
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.turnActive || session.cancel != nil {
+		return errors.New("cancel the active turn before switching models")
+	}
+	if session.options.Pipeline.ActivePipeline != "" {
+		pipeline, ok := session.options.Pipeline.Pipelines[session.options.Pipeline.ActivePipeline]
+		if !ok {
+			return errors.New("active pipeline is unavailable")
+		}
+		route, ok := pipeline.Stages[string(selection.Stage)]
+		if !ok {
+			return fmt.Errorf("stage %q is not configured", selection.Stage)
+		}
+		connectionFound := false
+		for _, reference := range route.Candidates {
+			connection, _, _ := strings.Cut(reference, "/")
+			if connection == selection.Connection {
+				connectionFound = true
+				break
+			}
+		}
+		if !connectionFound {
+			return fmt.Errorf("connection %q is not routed for stage %q", selection.Connection, selection.Stage)
+		}
+		connection := session.options.Pipeline.Connections[selection.Connection]
+		if connection.Class == config.ConnectionSubscriptionBridge && selection.Stage != erkaruntime.StagePlanning && selection.Stage != erkaruntime.StageReview {
+			return fmt.Errorf("subscription bridge %q cannot run stage %q", selection.Connection, selection.Stage)
+		}
+		if route.Budget.MaxCostMicrounits > 0 {
+			metadata, configured := connection.Models[selection.Model]
+			priced := strings.TrimSpace(metadata.Currency) != "" && (metadata.InputCostPerMillionMicrounits > 0 || metadata.OutputCostPerMillionMicrounits > 0)
+			if !configured || !priced {
+				return fmt.Errorf("model %q requires configured pricing for stage %q cost enforcement", selection.Model, selection.Stage)
+			}
+		}
+		if session.modelOverrides == nil {
+			session.modelOverrides = make(map[erkaruntime.Stage]string)
+		}
+		selected := selection.Connection + "/" + selection.Model
+		if len(route.Candidates) > 0 && route.Candidates[0] == selected {
+			delete(session.modelOverrides, selection.Stage)
+		} else {
+			session.modelOverrides[selection.Stage] = selected
+		}
+		return nil
+	}
+	if selection.Stage != "" && selection.Stage != erkaruntime.StageCoding {
+		return fmt.Errorf("single-provider sessions only support the coding stage")
+	}
+	if selection.Connection != "" && selection.Connection != "default" {
+		return fmt.Errorf("single-provider sessions use the default connection")
+	}
+	if session.options.RebuildProvider == nil {
+		return errors.New("model switching is unavailable in this session")
+	}
+	provider, err := session.options.RebuildProvider(selection.Model)
+	if err != nil {
+		return err
+	}
+	session.options.Provider = provider
+	session.options.NativeModel = selection.Model
+	return nil
+}
+
+func (session *Session) beginTurn() error {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.turnActive {
+		return errors.New("another turn is already active")
+	}
+	session.turnActive = true
+	return nil
+}
+
+func (session *Session) endTurn() {
+	session.mu.Lock()
+	session.turnActive = false
+	session.mu.Unlock()
+}
+
+func (session *Session) effectivePipeline() config.Resolved {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	resolved := session.options.Pipeline
+	if resolved.ActivePipeline == "" || len(session.modelOverrides) == 0 {
+		return resolved
+	}
+	pipeline, ok := resolved.Pipelines[resolved.ActivePipeline]
+	if !ok {
+		return resolved
+	}
+	stages := make(map[string]config.StageRoute, len(pipeline.Stages))
+	for name, route := range pipeline.Stages {
+		copyRoute := route
+		copyRoute.Candidates = append([]string(nil), route.Candidates...)
+		stages[name] = copyRoute
+	}
+	for stage, selected := range session.modelOverrides {
+		route, ok := stages[string(stage)]
+		if !ok {
+			continue
+		}
+		candidates := []string{selected}
+		for _, candidate := range route.Candidates {
+			if candidate != selected {
+				candidates = append(candidates, candidate)
+			}
+		}
+		route.Candidates = candidates
+		stages[string(stage)] = route
+	}
+	pipeline.Stages = stages
+	pipelines := make(map[string]config.Pipeline, len(resolved.Pipelines))
+	for name, configured := range resolved.Pipelines {
+		pipelines[name] = configured
+	}
+	pipelines[resolved.ActivePipeline] = pipeline
+	resolved.Pipelines = pipelines
+	return resolved
 }
 
 func (session *Session) maintainLease(ctx context.Context, cancel context.CancelFunc, done <-chan struct{}) {

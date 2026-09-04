@@ -18,6 +18,7 @@ type fakeController struct {
 	conversations []erkaruntime.TaskSnapshot
 	full          bool
 	cancelled     int
+	model         erkaruntime.ModelSelection
 }
 
 func (*fakeController) Root() string   { return "/repo" }
@@ -47,6 +48,10 @@ func (*fakeController) UnknownOutcome(context.Context, erkaruntime.TaskID) (erka
 func (*fakeController) ResolveUnknown(context.Context, erkaruntime.TaskID, bool) error { return nil }
 func (controller *fakeController) Cancel()                                             { controller.cancelled++ }
 func (controller *fakeController) SetFullExecution(value bool)                         { controller.full = value }
+func (controller *fakeController) SetModel(value erkaruntime.ModelSelection) error {
+	controller.model = value
+	return nil
+}
 
 func TestModelSubmitClearsComposerAndQueuesPrompt(t *testing.T) {
 	controller := &fakeController{}
@@ -217,6 +222,127 @@ func TestSlashCommandTabCompletion(t *testing.T) {
 	}
 }
 
+func TestProviderSlashCommandShowsConnectionStatus(t *testing.T) {
+	controller := &fakeController{}
+	model := NewModel(Options{Controller: controller, Provider: "deepseek", Model: "fixture",
+		Providers: func(context.Context) ([]ProviderInfo, error) {
+			return []ProviderInfo{
+				{Name: "chatgpt", Class: "subscription_bridge", State: "authenticated", Detail: "authenticated with ChatGPT", Models: []string{"default", "gpt-5.1-codex"}},
+				{Name: "coder", Class: "native", State: "ready"},
+			}, nil
+		},
+	})
+	model.Update(tea.WindowSizeMsg{Width: 90, Height: 28})
+	command := runSlash(t, model, "/provider")
+	if command == nil {
+		t.Fatal("provider command did not load status")
+	}
+	model.Update(command())
+	if model.overlay != "providers" {
+		t.Fatalf("provider overlay = %q", model.overlay)
+	}
+	if view := model.View().Content; !strings.Contains(view, "Providers and authentication") || !strings.Contains(view, "chatgpt") || !strings.Contains(view, "authenticated") || !strings.Contains(view, "configured models: default, gpt-5.1-codex") {
+		t.Fatalf("provider overlay missing status:\n%s", view)
+	}
+	model.Update(key("esc"))
+	if model.overlay != "" {
+		t.Fatalf("provider overlay did not close: %q", model.overlay)
+	}
+}
+
+func TestProviderSlashCommandWithoutReporterStillRenders(t *testing.T) {
+	model := NewModel(Options{Controller: &fakeController{}})
+	model.Update(tea.WindowSizeMsg{Width: 90, Height: 28})
+	command := runSlash(t, model, "/provider")
+	if command == nil {
+		t.Fatal("provider command did not load status")
+	}
+	model.Update(command())
+	if model.overlay != "providers" {
+		t.Fatalf("provider overlay = %q", model.overlay)
+	}
+	if view := model.View().Content; !strings.Contains(view, "unavailable") {
+		t.Fatalf("provider overlay missing unavailable state:\n%s", view)
+	}
+}
+
+func TestModelSlashCommandRejectsArguments(t *testing.T) {
+	controller := &fakeController{}
+	model := NewModel(Options{Controller: controller, Provider: "deepseek", Model: "fixture"})
+	runSlash(t, model, "/model deepseek-v4-pro")
+	if controller.model.Model != "" || !strings.Contains(model.status, "usage: /model") {
+		t.Fatalf("status = %q", model.status)
+	}
+}
+
+func TestModelSlashCommandOpensPickerAndSelects(t *testing.T) {
+	controller := &fakeController{}
+	model := NewModel(Options{Controller: controller, Provider: "deepseek", Model: "fixture",
+		Models: func(context.Context) ([]ModelOption, []string, error) {
+			return []ModelOption{
+				{Stage: erkaruntime.StagePlanning, Connection: "chatgpt", Class: "subscription_bridge", Provider: "codex", ID: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", Source: "live", Selectable: true, Current: true},
+				{Stage: erkaruntime.StageCoding, Connection: "coder", Class: "native", Provider: "deepseek", ID: "deepseek-v4-flash", Source: "configured+live", Selectable: true, Current: true},
+				{Stage: erkaruntime.StageCoding, Connection: "coder", Class: "native", Provider: "deepseek", ID: "deepseek-v4-pro", Source: "live", Selectable: true},
+			}, []string{"opencode: login required"}, nil
+		},
+	})
+	model.Update(tea.WindowSizeMsg{Width: 90, Height: 28})
+	command := runSlash(t, model, "/model")
+	if command == nil || model.overlay == "models" {
+		t.Fatalf("model command = overlay %q, command %v", model.overlay, command)
+	}
+	model.Update(command())
+	if view := model.View().Content; !strings.Contains(view, "Choose stage model") || !strings.Contains(view, "deepseek-v4-pro") || !strings.Contains(view, "Discovery warnings") {
+		t.Fatalf("model picker missing:\n%s", view)
+	}
+	model.Update(key("d"))
+	model.Update(key("e"))
+	model.Update(key("e"))
+	model.Update(key("p"))
+	if len(model.modelFiltered) != 2 {
+		t.Fatalf("filtered models = %d, want 2", len(model.modelFiltered))
+	}
+	model.Update(key("down"))
+	model.Update(key("enter"))
+	if controller.model.Stage != erkaruntime.StageCoding || controller.model.Connection != "coder" || controller.model.Model != "deepseek-v4-pro" || model.model != "deepseek-v4-pro" || model.overlay != "" {
+		t.Fatalf("selection = controller %#v, model %q, overlay %q", controller.model, model.model, model.overlay)
+	}
+	command = runSlash(t, model, "/model")
+	model.Update(command())
+	for _, option := range model.modelOptions {
+		if option.Stage == erkaruntime.StageCoding && option.ID == "deepseek-v4-pro" && !option.Current {
+			t.Fatalf("session selection was not retained after rediscovery: %#v", model.modelOptions)
+		}
+	}
+}
+
+func TestModelPickerKeepsDisabledUnpricedModelUnselected(t *testing.T) {
+	controller := &fakeController{}
+	model := NewModel(Options{Controller: controller, Models: func(context.Context) ([]ModelOption, []string, error) {
+		return []ModelOption{{Stage: erkaruntime.StageCoding, Connection: "coder", Class: "native", Provider: "deepseek", ID: "deepseek-v4-pro", Source: "live", Selectable: false, Detail: "configure model pricing"}}, nil, nil
+	}})
+	command := runSlash(t, model, "/model")
+	model.Update(command())
+	model.Update(key("enter"))
+	if controller.model.Model != "" || model.overlay != "models" || model.status != "configure model pricing" {
+		t.Fatalf("disabled selection = %#v, overlay %q, status %q", controller.model, model.overlay, model.status)
+	}
+}
+
+func TestModelPickerFitsInsideSmallTerminal(t *testing.T) {
+	options := make([]ModelOption, 30)
+	for index := range options {
+		options[index] = ModelOption{Stage: erkaruntime.StagePlanning, Connection: "chatgpt", Class: "subscription_bridge", Provider: "codex", ID: "gpt-fixture-" + strings.Repeat("x", index+1), Source: "live", Selectable: true}
+	}
+	model := NewModel(Options{Controller: &fakeController{}, Models: func(context.Context) ([]ModelOption, []string, error) { return options, nil, nil }})
+	model.Update(tea.WindowSizeMsg{Width: 46, Height: 14})
+	command := runSlash(t, model, "/model")
+	model.Update(command())
+	if view := model.View().Content; strings.Count(view, "\n")+1 > 14 {
+		t.Fatalf("model overlay exceeds terminal:\n%s", view)
+	}
+}
+
 func runSlash(t *testing.T, model *Model, value string) tea.Cmd {
 	t.Helper()
 	model.composer.SetValue(value)
@@ -258,9 +384,17 @@ func key(value string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyTab}
 	case "esc":
 		return tea.KeyPressMsg{Code: tea.KeyEscape}
+	case "up":
+		return tea.KeyPressMsg{Code: tea.KeyUp}
+	case "down":
+		return tea.KeyPressMsg{Code: tea.KeyDown}
 	case "y":
 		return tea.KeyPressMsg{Code: 'y', Text: "y"}
 	default:
+		runes := []rune(value)
+		if len(runes) == 1 {
+			return tea.KeyPressMsg{Code: runes[0], Text: value}
+		}
 		return tea.KeyPressMsg{}
 	}
 }

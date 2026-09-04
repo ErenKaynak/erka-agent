@@ -168,6 +168,56 @@ func TestResponsesRejectsMalformedStreamAndEndpoint(t *testing.T) {
 	}
 }
 
+func TestListModelsUsesV1EndpointAndDeduplicates(t *testing.T) {
+	t.Parallel()
+	provider, err := New(Options{APIKey: "secret", BaseURL: "https://example.test", Model: "gpt-b", Client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet || request.URL.String() != "https://example.test/v1/models" {
+			t.Fatalf("request = %s %s", request.Method, request.URL)
+		}
+		if request.Header.Get("Authorization") != "Bearer secret" {
+			t.Fatal("authorization header missing")
+		}
+		return response(http.StatusOK, "application/json", `{"data":[{"id":"gpt-b"},{"id":"gpt-a"},{"id":"gpt-a"}]}`), nil
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, err := provider.ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0].ID != "gpt-a" || models[1].ID != "gpt-b" || !models[1].Default {
+		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestListModelsRejectsMalformedOversizedAndCancelledResponses(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{`{bad}`, strings.Repeat("x", (1<<20)+1)} {
+		provider, err := New(Options{APIKey: "secret", BaseURL: "https://example.test/v1", Model: "gpt-a", Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return response(http.StatusOK, "application/json", body), nil
+		})}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provider.ListModels(context.Background()); err == nil {
+			t.Fatalf("ListModels() accepted %d-byte response", len(body))
+		}
+	}
+	provider, err := New(Options{APIKey: "secret", BaseURL: "https://example.test", Model: "gpt-a", Client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := provider.ListModels(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled ListModels() error = %v", err)
+	}
+}
+
 func modelRequest() erkaruntime.ModelRequest {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	return erkaruntime.ModelRequest{Instructions: "system", MaxOutputTokens: 100, Items: []erkaruntime.RuntimeItem{

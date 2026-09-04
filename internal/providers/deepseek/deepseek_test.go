@@ -3,6 +3,7 @@ package deepseek
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -141,6 +142,64 @@ func TestNewValidatesCredentialAndEndpoint(t *testing.T) {
 	}
 	if _, err := New(Options{APIKey: "x", BaseURL: "http://remote.test"}); err == nil || !strings.Contains(err.Error(), "HTTPS") {
 		t.Fatalf("HTTP endpoint error = %v", err)
+	}
+}
+
+func TestListModelsUsesAuthenticatedBoundedEndpoint(t *testing.T) {
+	t.Parallel()
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet || request.URL.String() != "https://example.test/models" {
+			t.Fatalf("request = %s %s", request.Method, request.URL)
+		}
+		if request.Header.Get("Authorization") != "Bearer secret" {
+			t.Fatal("authorization header missing")
+		}
+		return response(http.StatusOK, "application/json", `{"object":"list","data":[{"id":"deepseek-v4-pro"},{"id":"deepseek-v4-flash"},{"id":"deepseek-v4-pro"}]}`), nil
+	})
+	provider, err := New(Options{APIKey: "secret", BaseURL: "https://example.test", Model: "deepseek-v4-flash", Client: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, err := provider.ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0].ID != "deepseek-v4-flash" || !models[0].Default || models[1].ID != "deepseek-v4-pro" {
+		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestListModelsRejectsMalformedAndOversizedResponses(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{`{bad}`, strings.Repeat("x", (1<<20)+1)} {
+		provider, err := New(Options{APIKey: "secret", BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return response(http.StatusOK, "application/json", body), nil
+		})}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provider.ListModels(context.Background()); err == nil {
+			t.Fatalf("ListModels() accepted %d-byte response", len(body))
+		}
+	}
+}
+
+func TestListModelsHonorsVersionedEndpointAndCancellation(t *testing.T) {
+	t.Parallel()
+	provider, err := New(Options{APIKey: "secret", BaseURL: "https://example.test/v1", Client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() != "https://example.test/v1/models" {
+			t.Fatalf("URL = %s", request.URL)
+		}
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := provider.ListModels(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancelled ListModels() error = %v", err)
 	}
 }
 

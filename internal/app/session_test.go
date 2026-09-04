@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	"github.com/ErenKaynak/erka-agent/internal/routing"
@@ -48,6 +50,12 @@ func TestSessionRunsConfiguredPipelineAcrossProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StagePlanning, Connection: "planner", Model: "gpt-selected"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StageCoding, Connection: "coder", Model: "deepseek-selected"}); err != nil {
+		t.Fatal(err)
+	}
 	taskID, err := session.Submit(context.Background(), "", "fix arithmetic")
 	if err != nil {
 		t.Fatal(err)
@@ -63,10 +71,10 @@ func TestSessionRunsConfiguredPipelineAcrossProviders(t *testing.T) {
 	if conversation.Task.Pipeline != "default" || len(conversation.Runs) != 2 {
 		t.Fatalf("conversation = %#v", conversation)
 	}
-	if conversation.Runs[0].Stage != "planning" || conversation.Runs[0].Provider != "openai" || conversation.Runs[0].Status != erkaruntime.RunCompleted {
+	if conversation.Runs[0].Stage != "planning" || conversation.Runs[0].Provider != "openai" || conversation.Runs[0].Model != "gpt-selected" || conversation.Runs[0].Status != erkaruntime.RunCompleted {
 		t.Fatalf("planning run = %#v", conversation.Runs[0])
 	}
-	if conversation.Runs[1].Stage != "coding" || conversation.Runs[1].Provider != "deepseek" || conversation.Runs[1].Status != erkaruntime.RunCompleted {
+	if conversation.Runs[1].Stage != "coding" || conversation.Runs[1].Provider != "deepseek" || conversation.Runs[1].Model != "deepseek-selected" || conversation.Runs[1].Status != erkaruntime.RunCompleted {
 		t.Fatalf("coding run = %#v", conversation.Runs[1])
 	}
 	codingRequests := coder.Requests()
@@ -207,6 +215,9 @@ func TestSessionCancellationIsDurable(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() { _, _, runErr := session.RunNext(context.Background()); finished <- runErr }()
 	<-provider.started
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StageCoding, Connection: "default", Model: "another-model"}); err == nil || !strings.Contains(err.Error(), "active turn") {
+		t.Fatalf("SetModel() during active turn error = %v", err)
+	}
 	session.Cancel()
 	if err := <-finished; err == nil {
 		t.Fatal("cancelled run returned nil")
@@ -331,3 +342,105 @@ func (*blockingStream) Close() error { return nil }
 
 var _ erkaruntime.ModelProvider = (*blockingProvider)(nil)
 var _ erkaruntime.ModelStream = (*blockingStream)(nil)
+
+func TestSetModelOverridesNativeModelInPipeline(t *testing.T) {
+	session := &Session{options: SessionOptions{Pipeline: config.Resolved{ActivePipeline: "default"}}}
+	session.options.Pipeline.Connections = map[string]config.Connection{"coder": {Provider: "deepseek"}}
+	session.options.Pipeline.Pipelines = map[string]config.Pipeline{"default": {Stages: map[string]config.StageRoute{"coding": {Candidates: []string{"coder/deepseek-v4-flash"}}}}}
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StageCoding, Connection: "coder", Model: "deepseek-v4-pro"}); err != nil {
+		t.Fatalf("SetModel() error = %v", err)
+	}
+	if session.modelOverrides[erkaruntime.StageCoding] != "coder/deepseek-v4-pro" {
+		t.Fatalf("model override = %q, want coder/deepseek-v4-pro", session.modelOverrides[erkaruntime.StageCoding])
+	}
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StageCoding, Connection: "coder", Model: "  "}); err == nil {
+		t.Fatal("SetModel() accepted an empty model")
+	}
+}
+
+func TestSetModelRecordsSelectedModelInSingleProviderRun(t *testing.T) {
+	session := &Session{options: SessionOptions{
+		Provider:    &scriptedProvider{name: "deepseek"},
+		NativeModel: "deepseek-v4-flash",
+		IDs:         &sequenceIDs{},
+		RebuildProvider: func(model string) (erkaruntime.ModelProvider, error) {
+			return &scriptedProvider{name: "deepseek"}, nil
+		},
+	}}
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StageCoding, Connection: "default", Model: "deepseek-v4-pro"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := session.newInitialRun(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Provider != "deepseek" || run.Model != "deepseek-v4-pro" {
+		t.Fatalf("run = %#v", run)
+	}
+}
+
+func TestSetModelOverridesStagesBeforeRunCreationAndPreservesFallbacks(t *testing.T) {
+	resolved := config.Resolved{
+		ActivePipeline: "default",
+		Connections: map[string]config.Connection{
+			"chatgpt": {Class: config.ConnectionSubscriptionBridge, Provider: "codex"},
+			"coder":   {Class: config.ConnectionNative, Provider: "deepseek"},
+		},
+		Pipelines: map[string]config.Pipeline{"default": {Stages: map[string]config.StageRoute{
+			"planning": {Candidates: []string{"chatgpt/default"}},
+			"coding":   {Candidates: []string{"coder/deepseek-v4-flash", "coder/deepseek-v4-pro"}},
+		}}},
+	}
+	session := &Session{options: SessionOptions{Pipeline: resolved, IDs: &sequenceIDs{}}}
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StagePlanning, Connection: "chatgpt", Model: "gpt-5.6-sol"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StageCoding, Connection: "coder", Model: "deepseek-v4-pro"}); err != nil {
+		t.Fatal(err)
+	}
+	effective := session.effectivePipeline()
+	planning := effective.Pipelines["default"].Stages["planning"].Candidates
+	coding := effective.Pipelines["default"].Stages["coding"].Candidates
+	if len(planning) != 2 || planning[0] != "chatgpt/gpt-5.6-sol" || planning[1] != "chatgpt/default" {
+		t.Fatalf("planning route = %#v", planning)
+	}
+	if len(coding) != 2 || coding[0] != "coder/deepseek-v4-pro" || coding[1] != "coder/deepseek-v4-flash" {
+		t.Fatalf("coding route = %#v", coding)
+	}
+	if got := resolved.Pipelines["default"].Stages["planning"].Candidates[0]; got != "chatgpt/default" {
+		t.Fatalf("configured pipeline was mutated: %q", got)
+	}
+	run, err := session.newInitialRun(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Model != "gpt-5.6-sol" || run.Connection != "chatgpt" || run.BackendClass != config.ConnectionSubscriptionBridge {
+		t.Fatalf("initial run = %#v", run)
+	}
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StageCoding, Connection: "coder", Model: "deepseek-v4-flash"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := session.modelOverrides[erkaruntime.StageCoding]; exists {
+		t.Fatalf("configured selection did not clear override: %#v", session.modelOverrides)
+	}
+}
+
+func TestSetModelPreservesOpenCodeProviderQualifiedModel(t *testing.T) {
+	session := &Session{options: SessionOptions{Pipeline: config.Resolved{
+		ActivePipeline: "default",
+		Connections:    map[string]config.Connection{"open": {Class: config.ConnectionSubscriptionBridge, Provider: "opencode"}},
+		Pipelines: map[string]config.Pipeline{"default": {Stages: map[string]config.StageRoute{
+			"planning": {Candidates: []string{"open/default"}},
+		}}},
+	}}}
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StagePlanning, Connection: "open", Model: "openai/gpt-5.6-sol"}); err != nil {
+		t.Fatal(err)
+	}
+	route, err := routing.ResolveFixed(session.effectivePipeline(), erkaruntime.StagePlanning, erkaruntime.DefaultNativeLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.Candidates[0].Connection != "open" || route.Candidates[0].Model != "openai/gpt-5.6-sol" {
+		t.Fatalf("candidate = %#v", route.Candidates[0])
+	}
+}

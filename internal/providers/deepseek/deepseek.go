@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -66,6 +67,72 @@ func (*Provider) Name() string { return "deepseek" }
 
 func (*Provider) Capabilities(context.Context) (erkaruntime.ModelCapabilities, error) {
 	return erkaruntime.ModelCapabilities{Tools: true, ParallelToolCalls: true, StructuredOutput: true, ContextTokens: 1_000_000}, nil
+}
+
+func (provider *Provider) ListModels(ctx context.Context) ([]erkaruntime.ModelInfo, error) {
+	endpoint := strings.TrimSuffix(provider.endpoint, "/chat/completions") + "/models"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create DeepSeek model-list request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+provider.apiKey)
+	request.Header.Set("Accept", "application/json")
+	response, err := provider.client.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("list DeepSeek models: %w", err)
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read DeepSeek model list: %w", err)
+	}
+	if len(data) > 1<<20 {
+		return nil, errors.New("DeepSeek model list exceeded 1 MiB")
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, &erkaruntime.ProviderError{Code: fmt.Sprintf("http_%d", response.StatusCode), Message: apiModelError(data, http.StatusText(response.StatusCode)), Retryable: response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500}
+	}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("decode DeepSeek model list: %w", err)
+	}
+	models := make([]erkaruntime.ModelInfo, 0, len(payload.Data))
+	seen := make(map[string]bool, len(payload.Data))
+	for _, item := range payload.Data {
+		model := erkaruntime.ModelInfo{ID: strings.TrimSpace(item.ID), Default: strings.TrimSpace(item.ID) == provider.model}
+		if model.Validate() != nil || seen[model.ID] {
+			continue
+		}
+		seen[model.ID] = true
+		models = append(models, model)
+	}
+	if len(models) == 0 {
+		return nil, errors.New("DeepSeek model list contained no valid models")
+	}
+	sort.Slice(models, func(left, right int) bool { return models[left].ID < models[right].ID })
+	return models, nil
+}
+
+func apiModelError(data []byte, fallback string) string {
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(data, &payload) == nil && strings.TrimSpace(payload.Error.Message) != "" {
+		return payload.Error.Message
+	}
+	if value := strings.TrimSpace(string(data)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func (provider *Provider) Stream(ctx context.Context, request erkaruntime.ModelRequest) (erkaruntime.ModelStream, error) {
@@ -341,4 +408,5 @@ func nonEmpty(value, fallback string) string {
 }
 
 var _ erkaruntime.ModelProvider = (*Provider)(nil)
+var _ erkaruntime.ModelCatalog = (*Provider)(nil)
 var _ erkaruntime.ModelStream = (*stream)(nil)

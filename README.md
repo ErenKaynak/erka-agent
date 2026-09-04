@@ -48,6 +48,8 @@ the model:
 - `/workspace`: immediately return to workspace-only execution.
 - `/cancel`: confirm cancellation of the active turn.
 - `/status`: show the current task, provider, state, and permission mode.
+- `/provider`: show native connection and subscription bridge status.
+- `/model`: discover models and open the searchable per-stage model picker.
 - `/quit`: confirm exit.
 
 Use `//text` to send a model prompt that begins with a literal `/`. Help, diff,
@@ -200,6 +202,25 @@ erka auth login codex --device
 erka auth status
 erka providers
 ```
+
+Inside the TUI, the `/provider` command shows the same native connection and
+subscription bridge status with connection guidance. `/model` queries only the
+configured connections, merges their live catalogs with configured model IDs,
+and lets you choose planning, coding, validation, repair, and review models
+independently. The selection lasts for the current erka process and does not
+rewrite configuration.
+
+The same read-only discovery is available for scripts and diagnostics:
+
+```bash
+erka models
+```
+
+Codex models come from the signed-in CLI's app-server catalog, OpenCode models
+come from `opencode models --pure`, and native DeepSeek/OpenAI models come from
+their authenticated model-list endpoints. Discovery does not run an inference
+request. If a live catalog is unavailable, configured models remain visible and
+the failing connection is reported as a warning.
 
 OpenCode authentication can be delegated with `erka auth login opencode`. Both
 CLIs are optional runtime discoveries; erka does not download, link, or depend

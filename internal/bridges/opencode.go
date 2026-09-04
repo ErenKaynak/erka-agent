@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -65,6 +67,61 @@ func (*OpenCode) Name() string { return "opencode" }
 
 func (*OpenCode) Capabilities(context.Context) (erkaruntime.ModelCapabilities, error) {
 	return erkaruntime.ModelCapabilities{Tools: true, StructuredOutput: true}, nil
+}
+
+func (bridge *OpenCode) ListModels(ctx context.Context) ([]erkaruntime.ModelInfo, error) {
+	availability, err := bridge.Availability(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !availability.Available {
+		return nil, providerFailure("opencode_unavailable", availability.Detail, true)
+	}
+	if !availability.Authenticated {
+		return nil, providerFailure("opencode_auth", availability.Detail, false)
+	}
+	path, err := bridge.runner.LookPath(bridge.executable)
+	if err != nil {
+		return nil, fmt.Errorf("find OpenCode CLI: %w", err)
+	}
+	directory, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	process, err := bridge.runner.Run(ctx, Invocation{
+		Executable: path, Arguments: []string{"models", "--pure"}, Directory: directory,
+		Environment: openCodeEnvironment(), OutputLimitBytes: 4 << 20,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if process.Truncated {
+		return nil, errors.New("OpenCode model catalog output exceeded 4 MiB")
+	}
+	if process.ExitCode != 0 {
+		return nil, providerFailure("opencode_models_failed", process.Stderr, retryableProcessFailure(process.Stderr))
+	}
+	models := parseOpenCodeModels(process.Stdout)
+	if len(models) == 0 {
+		return nil, errors.New("OpenCode model catalog contained no valid models")
+	}
+	return models, nil
+}
+
+func parseOpenCodeModels(output string) []erkaruntime.ModelInfo {
+	seen := make(map[string]bool)
+	models := make([]erkaruntime.ModelInfo, 0)
+	for _, line := range strings.Split(output, "\n") {
+		id := strings.TrimSpace(line)
+		model := erkaruntime.ModelInfo{ID: id}
+		if model.Validate() != nil || !strings.Contains(id, "/") || seen[id] {
+			continue
+		}
+		seen[id] = true
+		models = append(models, model)
+	}
+	sort.Slice(models, func(left, right int) bool { return models[left].ID < models[right].ID })
+	return models
 }
 
 func (bridge *OpenCode) Availability(ctx context.Context) (erkaruntime.BridgeAvailability, error) {
@@ -230,3 +287,4 @@ func parseOpenCodeJSONL(stage erkaruntime.Stage, stream string, maxOutputBytes i
 }
 
 var _ erkaruntime.SubscriptionBridge = (*OpenCode)(nil)
+var _ erkaruntime.ModelCatalog = (*OpenCode)(nil)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/ErenKaynak/erka-agent/internal/auth"
 	"github.com/ErenKaynak/erka-agent/internal/buildinfo"
+	"github.com/ErenKaynak/erka-agent/internal/catalog"
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 )
@@ -53,7 +54,7 @@ func TestExecuteHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("Execute() code = %d, want 0; stderr = %q", code, stderr)
 	}
-	for _, fragment := range []string{"Usage:", "auth", "providers", "run", "version", "--config", "--state-dir", "--pipeline"} {
+	for _, fragment := range []string{"Usage:", "auth", "models", "providers", "run", "version", "--config", "--state-dir", "--pipeline"} {
 		if !strings.Contains(stdout, fragment) {
 			t.Errorf("Execute() help missing %q:\n%s", fragment, stdout)
 		}
@@ -280,4 +281,25 @@ func fakeRunner(_ context.Context, _ config.Resolved, objective string, resume e
 	}
 	_, _ = fmt.Fprintf(output, "ran: %s\n", objective)
 	return nil
+}
+
+func TestModelsCommandListsLiveAndConfiguredModels(t *testing.T) {
+	previous := discoverConfiguredModels
+	discoverConfiguredModels = func(context.Context, config.Resolved, *auth.Manager) catalog.Result {
+		return catalog.Result{Entries: []catalog.Entry{
+			{Stage: erkaruntime.StagePlanning, Connection: "coder", Class: config.ConnectionNative, Provider: "deepseek", Model: erkaruntime.ModelInfo{ID: "deepseek-v4-flash"}, Source: "configured+live", State: "available", Current: true, Selectable: true},
+			{Stage: erkaruntime.StageCoding, Connection: "coder", Class: config.ConnectionNative, Provider: "deepseek", Model: erkaruntime.ModelInfo{ID: "deepseek-v4-pro"}, Source: "live", State: "available", Selectable: true},
+		}}
+	}
+	t.Cleanup(func() { discoverConfiguredModels = previous })
+	resolved := config.Resolved{}
+	stdout, stderr, code := executeForTestWithLoader(t, func(context.Context, config.Options) (config.Resolved, error) { return resolved, nil }, "models")
+	if code != 0 || stderr != "" {
+		t.Fatalf("models command = code %d, stderr %q", code, stderr)
+	}
+	for _, fragment := range []string{"STAGE\tCONNECTION", "planning\tcoder\tnative\tdeepseek\tdeepseek-v4-flash\tconfigured+live", "coding\tcoder\tnative\tdeepseek\tdeepseek-v4-pro\tlive"} {
+		if !strings.Contains(stdout, fragment) {
+			t.Fatalf("models output missing %q:\n%s", fragment, stdout)
+		}
+	}
 }

@@ -12,13 +12,15 @@ import (
 )
 
 type CodexOptions struct {
-	Executable string
-	Runner     Runner
+	Executable    string
+	Runner        Runner
+	CatalogRunner CodexCatalogRunner
 }
 
 type Codex struct {
-	executable string
-	runner     Runner
+	executable    string
+	runner        Runner
+	catalogRunner CodexCatalogRunner
 }
 
 func NewCodex(options CodexOptions) *Codex {
@@ -30,13 +32,42 @@ func NewCodex(options CodexOptions) *Codex {
 	if runner == nil {
 		runner = LocalRunner{}
 	}
-	return &Codex{executable: executable, runner: runner}
+	catalogRunner := options.CatalogRunner
+	if catalogRunner == nil {
+		catalogRunner = runCodexModelCatalog
+	}
+	return &Codex{executable: executable, runner: runner, catalogRunner: catalogRunner}
 }
 
 func (*Codex) Name() string { return "codex" }
 
 func (*Codex) Capabilities(context.Context) (erkaruntime.ModelCapabilities, error) {
 	return erkaruntime.ModelCapabilities{Tools: true, StructuredOutput: true}, nil
+}
+
+func (bridge *Codex) ListModels(ctx context.Context) ([]erkaruntime.ModelInfo, error) {
+	availability, err := bridge.Availability(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !availability.Available {
+		return nil, providerFailure("codex_unavailable", availability.Detail, true)
+	}
+	if !availability.Authenticated {
+		return nil, providerFailure("codex_auth", availability.Detail, false)
+	}
+	path, err := bridge.runner.LookPath(bridge.executable)
+	if err != nil {
+		return nil, fmt.Errorf("find Codex CLI: %w", err)
+	}
+	directory, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	return bridge.catalogRunner(ctx, path, directory, selectedEnvironment(
+		"COMSPEC", "HOME", "LANG", "LC_ALL", "PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "WINDIR",
+		"CODEX_HOME", "CODEX_CA_CERTIFICATE", "SSL_CERT_FILE",
+	))
 }
 
 func (bridge *Codex) Availability(ctx context.Context) (erkaruntime.BridgeAvailability, error) {
@@ -213,3 +244,4 @@ func retryableProcessFailure(message string) bool {
 }
 
 var _ erkaruntime.SubscriptionBridge = (*Codex)(nil)
+var _ erkaruntime.ModelCatalog = (*Codex)(nil)

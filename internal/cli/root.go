@@ -152,6 +152,9 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	root.AddCommand(newProvidersCommand(func(ctx context.Context) (config.Resolved, error) {
 		return loadConfig(ctx, config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, APIKeyEnv: apiKeyEnv, Pipeline: pipeline, AllowFullExecution: allowFullExecution})
 	}))
+	root.AddCommand(newModelsCommand(func(ctx context.Context) (config.Resolved, error) {
+		return loadConfig(ctx, config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, APIKeyEnv: apiKeyEnv, Pipeline: pipeline, AllowFullExecution: allowFullExecution})
+	}))
 	root.AddCommand(newRunCommand(func(ctx context.Context, prompt string, resume erkaruntime.TaskID, limits runLimits, output io.Writer) error {
 		limits.allowFullExecution = allowFullExecution
 		resolved, err := loadConfig(ctx, config.Options{
@@ -275,7 +278,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 	}
 	_, err = app.RunLocal(ctx, app.LocalOptions{
 		WorkingDirectory: workingDirectory, StateDir: resolved.StateDir,
-		Objective: objective, ResumeTaskID: resume, Provider: provider, Output: output,
+		Objective: objective, ResumeTaskID: resume, Provider: provider, NativeModel: resolved.Model, Output: output,
 		AllowFullExecution: resolved.AllowFullExecution,
 		Limits:             nativeLimits(resolved),
 	})
@@ -308,7 +311,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 			return err
 		}
 		defer session.Close()
-		model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: "pipeline", Model: resolved.ActivePipeline, Branch: session.Branch(ctx), Full: options.Full, Live: live})
+		model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: "pipeline", Model: resolved.ActivePipeline, Branch: session.Branch(ctx), Full: options.Full, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
 		return tui.Run(model, input, output)
 	}
 	key, _, credentialErr := manager.Resolve(ctx, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
@@ -325,6 +328,13 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 	if err != nil {
 		return err
 	}
+	rebuildProvider := func(model string) (erkaruntime.ModelProvider, error) {
+		key, _, err := manager.Resolve(context.Background(), resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s credential: %w", resolved.Provider, err)
+		}
+		return openNativeProvider(resolved.Provider, resolved.BaseURL, model, key)
+	}
 	workingDirectory := options.WorkingDirectory
 	if workingDirectory == "" {
 		workingDirectory, err = os.Getwd()
@@ -339,12 +349,12 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 		default:
 		}
 	})
-	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full})
+	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider})
 	if err != nil {
 		return err
 	}
 	defer session.Close()
-	model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: resolved.Provider, Model: resolved.Model, Branch: session.Branch(ctx), Full: options.Full, Live: live})
+	model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: resolved.Provider, Model: resolved.Model, Branch: session.Branch(ctx), Full: options.Full, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
 	return tui.Run(model, input, output)
 }
 
@@ -378,6 +388,92 @@ func configuredBridgeFactory() app.BridgeFactory {
 		}
 		return bridge, nil
 	}
+}
+
+func providerStatusFunc(manager *auth.Manager, resolved config.Resolved) tui.ProviderStatusFunc {
+	return func(ctx context.Context) ([]tui.ProviderInfo, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return collectProviderStatus(ctx, manager, resolved)
+	}
+}
+
+func collectProviderStatus(ctx context.Context, manager *auth.Manager, resolved config.Resolved) ([]tui.ProviderInfo, error) {
+	if len(resolved.Connections) == 0 {
+		models := []string{resolved.Model}
+		if strings.TrimSpace(resolved.Model) == "" {
+			models = []string{config.DefaultModel}
+		}
+		return []tui.ProviderInfo{nativeStatus(ctx, manager, "default", resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv, models)}, nil
+	}
+	names := make([]string, 0, len(resolved.Connections))
+	for name := range resolved.Connections {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	infos := make([]tui.ProviderInfo, 0, len(names))
+	for _, name := range names {
+		connection := resolved.Connections[name]
+		if connection.Class == config.ConnectionSubscriptionBridge {
+			infos = append(infos, bridgeStatus(ctx, name, connection))
+			continue
+		}
+		infos = append(infos, nativeStatus(ctx, manager, name, connection.Provider, connection.BaseURL, connection.APIKeyEnv, sortedModelKeys(connection.Models)))
+	}
+	return infos, nil
+}
+
+func nativeStatus(ctx context.Context, manager *auth.Manager, name, provider, baseURL, apiKeyEnv string, models []string) tui.ProviderInfo {
+	info := tui.ProviderInfo{Name: name, Class: config.ConnectionNative, Detail: provider, Models: models}
+	_, _, err := manager.Resolve(ctx, provider, baseURL, apiKeyEnv)
+	switch {
+	case err == nil:
+		info.State = "ready"
+	case errors.Is(err, auth.ErrCredentialNotFound):
+		info.State = "credential required"
+	default:
+		info.State = "unavailable"
+		info.Detail = provider + " (" + err.Error() + ")"
+	}
+	return info
+}
+
+func sortedModelKeys(models map[string]config.ModelConfig) []string {
+	keys := make([]string, 0, len(models))
+	for model := range models {
+		keys = append(keys, model)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func bridgeStatus(ctx context.Context, name string, connection config.Connection) tui.ProviderInfo {
+	info := tui.ProviderInfo{Name: name, Class: config.ConnectionSubscriptionBridge, Detail: connection.Provider, Models: sortedModelKeys(connection.Models)}
+	bridge, err := bridges.New(connection.Provider, connection.Command)
+	if err != nil {
+		info.State = "unavailable"
+		info.Detail = connection.Provider + " (" + err.Error() + ")"
+		return info
+	}
+	availability, err := bridge.Availability(ctx)
+	if err != nil {
+		info.State = "unavailable"
+		info.Detail = connection.Provider + " (" + err.Error() + ")"
+		return info
+	}
+	switch {
+	case !availability.Available:
+		info.State = "unavailable"
+	case !availability.Authenticated:
+		info.State = "login required"
+	default:
+		info.State = "authenticated"
+	}
+	if strings.TrimSpace(availability.Detail) != "" {
+		info.Detail = availability.Detail
+	}
+	return info
 }
 
 func openNativeProvider(providerName, baseURL, model, key string) (erkaruntime.ModelProvider, error) {
@@ -516,6 +612,9 @@ func newProvidersCommand(load func(context.Context) (config.Resolved, error)) *c
 					}
 					caps, _ := bridge.Capabilities(command.Context())
 					capabilities = fmt.Sprintf("tools=%t structured_output=%t", caps.Tools, caps.StructuredOutput)
+				}
+				if models := sortedModelKeys(connection.Models); len(models) > 0 {
+					capabilities += " configured_models=" + strings.Join(models, ",")
 				}
 				if _, err := fmt.Fprintf(command.OutOrStdout(), "%s\t%s\t%s\t%s\t%s\n", name, connection.Class, connection.Provider, state, capabilities); err != nil {
 					return err

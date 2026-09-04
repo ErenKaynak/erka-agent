@@ -1,6 +1,7 @@
 # Local project guidance and scope documents
 /AGENTS.md
 /docs/
+/deepseek-changes.md
 
 # Local erka state (project configuration may remain trackable)
 /.erka/state/

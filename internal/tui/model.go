@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,7 @@ type Controller interface {
 	ResolveUnknown(context.Context, erkaruntime.TaskID, bool) error
 	Cancel()
 	SetFullExecution(bool)
+	SetModel(erkaruntime.ModelSelection) error
 }
 
 type Options struct {
@@ -41,7 +43,40 @@ type Options struct {
 	Branch     string
 	Full       bool
 	Live       <-chan erkaruntime.LiveUpdate
+	Providers  ProviderStatusFunc
+	Models     ModelCatalogFunc
 }
+
+// ModelOption is one provider model eligible for one configured stage.
+type ModelOption struct {
+	Stage       erkaruntime.Stage
+	Connection  string
+	Class       string
+	Provider    string
+	ID          string
+	DisplayName string
+	Source      string
+	State       string
+	Detail      string
+	Default     bool
+	Current     bool
+	Selectable  bool
+}
+
+type ModelCatalogFunc func(context.Context) ([]ModelOption, []string, error)
+
+// ProviderInfo describes one native connection or subscription bridge and
+// whether erka can currently use it.
+type ProviderInfo struct {
+	Name   string
+	Class  string
+	State  string
+	Detail string
+	Models []string
+}
+
+// ProviderStatusFunc reports connection and authentication status on demand.
+type ProviderStatusFunc func(context.Context) ([]ProviderInfo, error)
 
 type Model struct {
 	ctx                              context.Context
@@ -61,6 +96,15 @@ type Model struct {
 	pickerIndex                      int
 	diff                             string
 	unknown                          erkaruntime.ToolCall
+	providers                        ProviderStatusFunc
+	providerList                     []ProviderInfo
+	models                           ModelCatalogFunc
+	modelOptions                     []ModelOption
+	modelFiltered                    []int
+	modelIssues                      []string
+	modelFilter                      string
+	modelIndex                       int
+	modelSelections                  map[erkaruntime.Stage]string
 }
 
 type loadedMsg struct {
@@ -83,6 +127,15 @@ type diffMsg struct {
 	value string
 	err   error
 }
+type providersMsg struct {
+	infos []ProviderInfo
+	err   error
+}
+type modelsMsg struct {
+	options []ModelOption
+	issues  []string
+	err     error
+}
 type resolvedMsg struct{ err error }
 
 type slashCommand struct {
@@ -101,6 +154,8 @@ var slashCommands = []slashCommand{
 	{name: "workspace", usage: "/workspace"},
 	{name: "cancel", usage: "/cancel"},
 	{name: "status", usage: "/status"},
+	{name: "provider", usage: "/provider"},
+	{name: "model", usage: "/model"},
 	{name: "quit", usage: "/quit"},
 }
 
@@ -121,7 +176,7 @@ func NewModel(options Options) *Model {
 	transcript.SoftWrap = true
 	activity := viewport.New()
 	activity.SoftWrap = true
-	return &Model{ctx: ctx, controller: options.Controller, composer: composer, transcript: transcript, activity: activity, taskID: options.TaskID, provider: options.Provider, model: options.Model, branch: options.Branch, full: options.Full, live: options.Live, status: "ready"}
+	return &Model{ctx: ctx, controller: options.Controller, composer: composer, transcript: transcript, activity: activity, taskID: options.TaskID, provider: options.Provider, model: options.Model, branch: options.Branch, full: options.Full, live: options.Live, providers: options.Providers, models: options.Models, modelSelections: make(map[erkaruntime.Stage]string), status: "ready"}
 }
 
 func (model *Model) Init() tea.Cmd { return tea.Batch(model.load(), model.waitLive()) }
@@ -239,6 +294,31 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.overlay = "diff"
 		}
 		return model, nil
+	case providersMsg:
+		model.errText = errorText(message.err)
+		model.providerList = message.infos
+		if message.err == nil {
+			model.overlay = "providers"
+		}
+		return model, nil
+	case modelsMsg:
+		model.errText = errorText(message.err)
+		if message.err != nil {
+			model.status = "model discovery failed"
+			return model, nil
+		}
+		model.modelOptions = message.options
+		for index := range model.modelOptions {
+			if selected := model.modelSelections[model.modelOptions[index].Stage]; selected != "" {
+				model.modelOptions[index].Current = selected == model.modelOptions[index].Connection+"/"+model.modelOptions[index].ID
+			}
+		}
+		model.modelIssues = message.issues
+		model.modelFilter = ""
+		model.refilterModels()
+		model.overlay = "models"
+		model.status = "choose a model"
+		return model, nil
 	case resolvedMsg:
 		model.errText = errorText(message.err)
 		if message.err != nil {
@@ -340,6 +420,31 @@ func (model *Model) loadDiff() tea.Cmd {
 	return func() tea.Msg { value, err := model.controller.Diff(model.ctx); return diffMsg{value: value, err: err} }
 }
 
+func (model *Model) loadProviders() tea.Cmd {
+	if model.providers == nil {
+		return func() tea.Msg {
+			return providersMsg{infos: []ProviderInfo{{Name: "default", Class: "native", State: "unavailable", Detail: "provider status is unavailable in this session"}}}
+		}
+	}
+	return func() tea.Msg {
+		infos, err := model.providers(model.ctx)
+		return providersMsg{infos: infos, err: err}
+	}
+}
+
+func (model *Model) loadModels() tea.Cmd {
+	if model.models == nil {
+		return func() tea.Msg { return modelsMsg{err: errors.New("model discovery is unavailable in this session")} }
+	}
+	return func() tea.Msg {
+		options, issues, err := model.models(model.ctx)
+		if err == nil && len(options) == 0 {
+			err = errors.New("no configured stage has an available model")
+		}
+		return modelsMsg{options: options, issues: issues, err: err}
+	}
+}
+
 func (model *Model) resolve(success bool) tea.Cmd {
 	return func() tea.Msg {
 		return resolvedMsg{err: model.controller.ResolveUnknown(model.ctx, model.taskID, success)}
@@ -420,6 +525,22 @@ func (model *Model) runSlashCommand(input string) tea.Cmd {
 		if requireNoArguments() {
 			model.overlay = "status"
 		}
+	case "provider", "providers":
+		if requireNoArguments() {
+			model.status = "loading providers"
+			return model.loadProviders()
+		}
+	case "model":
+		if len(fields) != 1 {
+			model.status = "usage: /model"
+			return nil
+		}
+		if model.active {
+			model.status = "cancel the active turn before switching models"
+			return nil
+		}
+		model.status = "loading models"
+		return model.loadModels()
 	case "quit", "exit":
 		if requireNoArguments() {
 			model.confirmExit = true
@@ -449,7 +570,7 @@ func (model *Model) openPicker() {
 
 func (model *Model) handleOverlay(key string) (tea.Model, tea.Cmd) {
 	switch model.overlay {
-	case "help", "diff", "status":
+	case "help", "diff", "status", "providers":
 		if key == "esc" || (model.overlay == "help" && key == "?") {
 			model.overlay = ""
 		}
@@ -476,6 +597,59 @@ func (model *Model) handleOverlay(key string) (tea.Model, tea.Cmd) {
 				model.taskID = selected
 				model.overlay = ""
 				return model, model.load()
+			}
+		}
+	case "models":
+		switch key {
+		case "esc":
+			model.overlay = ""
+		case "up":
+			if model.modelIndex > 0 {
+				model.modelIndex--
+			}
+		case "down":
+			if model.modelIndex+1 < len(model.modelFiltered) {
+				model.modelIndex++
+			}
+		case "backspace":
+			value := []rune(model.modelFilter)
+			if len(value) > 0 {
+				model.modelFilter = string(value[:len(value)-1])
+				model.refilterModels()
+			}
+		case "enter":
+			if len(model.modelFiltered) == 0 {
+				return model, nil
+			}
+			selected := model.modelOptions[model.modelFiltered[model.modelIndex]]
+			if !selected.Selectable {
+				model.status = selected.Detail
+				return model, nil
+			}
+			selection := erkaruntime.ModelSelection{Stage: selected.Stage, Connection: selected.Connection, Model: selected.ID}
+			if err := model.controller.SetModel(selection); err != nil {
+				model.errText = errorText(err)
+				model.overlay = ""
+				model.status = "model switch failed"
+				return model, nil
+			}
+			for index := range model.modelOptions {
+				if model.modelOptions[index].Stage == selected.Stage {
+					model.modelOptions[index].Current = model.modelOptions[index].Connection == selected.Connection && model.modelOptions[index].ID == selected.ID
+				}
+			}
+			model.modelSelections[selected.Stage] = selected.Connection + "/" + selected.ID
+			model.model = selected.ID
+			model.overlay = ""
+			model.status = fmt.Sprintf("%s model set to %s/%s", selected.Stage, selected.Connection, selected.ID)
+		default:
+			value := key
+			if key == "space" {
+				value = " "
+			}
+			if len([]rune(value)) == 1 {
+				model.modelFilter += value
+				model.refilterModels()
 			}
 		}
 	case "permission":
@@ -604,6 +778,12 @@ func (model *Model) render() string {
 			permission = "full"
 		}
 		return overlay(model.width, model.height, "Session status", fmt.Sprintf("Task: %s\nState: %s\nProvider: %s/%s\nPermission: %s\nRead-only: %t\n\nEsc close", Sanitize(task), Sanitize(model.status), Sanitize(model.provider), Sanitize(model.model), permission, model.controller.ReadOnly()))
+	}
+	if model.overlay == "providers" {
+		return overlay(model.width, model.height, "Providers and authentication", providersContents(model.providerList))
+	}
+	if model.overlay == "models" {
+		return overlay(model.width, model.height, "Choose stage model", model.modelsContents())
 	}
 	if model.confirmExit {
 		return overlay(model.width, model.height, "Exit erka?", "Cancel the active process and exit? Queued prompts remain durable. [y/N]")
@@ -744,9 +924,115 @@ func helpContents() string {
 		"/help /new /sessions /diff\n" +
 		"/open <task-id>\n" +
 		"/permissions /full /workspace\n" +
-		"/cancel /status /quit\n" +
+		"/cancel /status /provider /model /quit\n" +
 		"Tab completes · // sends literal /\n\n" +
 		"Esc or ? closes help"
+}
+
+func providersContents(infos []ProviderInfo) string {
+	if len(infos) == 0 {
+		infos = []ProviderInfo{{Name: "default", Class: "native", State: "unavailable", Detail: "no provider status reported"}}
+	}
+	var builder strings.Builder
+	for _, info := range infos {
+		fmt.Fprintf(&builder, "%s  %s  %s\n", info.Class, info.Name, info.State)
+		if strings.TrimSpace(info.Detail) != "" {
+			fmt.Fprintf(&builder, "  %s\n", info.Detail)
+		}
+		if len(info.Models) > 0 {
+			fmt.Fprintf(&builder, "  configured models: %s\n", strings.Join(info.Models, ", "))
+		}
+	}
+	builder.WriteString("\nConnect a native key:\n  export ERKA_DEEPSEEK_API_KEY=… (or ERKA_OPENAI_API_KEY=…), then restart erka\n\nConnect a subscription bridge:\n  erka auth login codex --device\n  erka auth login opencode\n\nUse /model to discover and switch configured stage models.\n\nEsc close")
+	return builder.String()
+}
+
+func (model *Model) refilterModels() {
+	query := strings.ToLower(strings.TrimSpace(model.modelFilter))
+	model.modelFiltered = model.modelFiltered[:0]
+	for index, option := range model.modelOptions {
+		if query == "" || strings.Contains(modelOptionSearchText(option), query) {
+			model.modelFiltered = append(model.modelFiltered, index)
+		}
+	}
+	if model.modelIndex >= len(model.modelFiltered) {
+		model.modelIndex = len(model.modelFiltered) - 1
+	}
+	if model.modelIndex < 0 {
+		model.modelIndex = 0
+	}
+}
+
+func modelOptionSearchText(option ModelOption) string {
+	return strings.ToLower(strings.Join([]string{string(option.Stage), option.Connection, option.Class, option.Provider, option.ID, option.DisplayName}, " "))
+}
+
+func (model *Model) modelsContents() string {
+	var builder strings.Builder
+	filter := model.modelFilter
+	if filter == "" {
+		filter = "type to filter"
+	}
+	fmt.Fprintf(&builder, "Search: %s\n\n", filter)
+	if len(model.modelFiltered) == 0 {
+		builder.WriteString("No matching models.\n")
+	} else {
+		visible := model.height - 14
+		if visible < 3 {
+			visible = 3
+		}
+		if visible > 12 {
+			visible = 12
+		}
+		start := model.modelIndex - visible/2
+		if start < 0 {
+			start = 0
+		}
+		if start+visible > len(model.modelFiltered) {
+			start = len(model.modelFiltered) - visible
+			if start < 0 {
+				start = 0
+			}
+		}
+		end := start + visible
+		if end > len(model.modelFiltered) {
+			end = len(model.modelFiltered)
+		}
+		for position := start; position < end; position++ {
+			option := model.modelOptions[model.modelFiltered[position]]
+			marker := "  "
+			if position == model.modelIndex {
+				marker = "› "
+			}
+			name := option.ID
+			if option.DisplayName != "" && option.DisplayName != option.ID {
+				name = option.DisplayName + " (" + option.ID + ")"
+			}
+			backend := option.Provider + "/" + option.Class
+			tags := []string{backend, option.Source}
+			if option.State != "" && option.State != option.Source {
+				tags = append(tags, option.State)
+			}
+			if option.Current {
+				tags = append(tags, "current")
+			}
+			if option.Default {
+				tags = append(tags, "default")
+			}
+			if !option.Selectable {
+				tags = append(tags, "disabled")
+			}
+			fmt.Fprintf(&builder, "%s%s · %s · %s  [%s]\n", marker, option.Stage, option.Connection, name, strings.Join(tags, ", "))
+		}
+	}
+	if len(model.modelIssues) > 0 {
+		builder.WriteString("\nDiscovery warnings:\n")
+		for _, issue := range model.modelIssues {
+			fmt.Fprintf(&builder, "  %s\n", issue)
+		}
+	}
+	builder.WriteString("\nType search · ↑/↓ navigate · Enter select · Esc close")
+	return builder.String()
 }
 
 func slashCommandSuggestions(value string, limit int) []string {
