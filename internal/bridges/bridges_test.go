@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -123,6 +124,55 @@ func TestOpenCodeModelCatalogKeepsProviderQualifiedIDs(t *testing.T) {
 	}
 }
 
+func TestOpenCodeModelCatalogHandlesLargeCatalog(t *testing.T) {
+	t.Parallel()
+	const modelCount = 10_000
+	var output strings.Builder
+	for index := modelCount - 1; index >= 0; index-- {
+		_, _ = fmt.Fprintf(&output, "provider/model-%05d\n", index)
+	}
+	runner := &scriptedRunner{results: []ProcessResult{
+		{ExitCode: 0, Stdout: "1.2.3\n"},
+		{ExitCode: 0, Stdout: "1 credentials\n"},
+		{ExitCode: 0, Stdout: output.String()},
+	}}
+	models, err := NewOpenCode(OpenCodeOptions{Executable: "opencode-fixture", Runner: runner}).ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != modelCount || models[0].ID != "provider/model-00000" || models[modelCount-1].ID != "provider/model-09999" {
+		t.Fatalf("large catalog boundaries = %d, %q, %q", len(models), models[0].ID, models[len(models)-1].ID)
+	}
+}
+
+func TestOpenCodeModelCatalogClassifiesNonzeroProcessFailures(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		stderr    string
+		retryable bool
+	}{
+		{name: "temporary", stderr: "503 temporarily unavailable", retryable: true},
+		{name: "permanent", stderr: "provider configuration is invalid", retryable: false},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			runner := &scriptedRunner{results: []ProcessResult{
+				{ExitCode: 0, Stdout: "1.2.3\n"},
+				{ExitCode: 0, Stdout: "1 credentials\n"},
+				{ExitCode: 7, Stderr: test.stderr},
+			}}
+			_, err := NewOpenCode(OpenCodeOptions{Executable: "opencode-fixture", Runner: runner}).ListModels(context.Background())
+			var failure *erkaruntime.ProviderError
+			if !errors.As(err, &failure) || failure.Code != "opencode_models_failed" || failure.Retryable != test.retryable || !strings.Contains(failure.Message, test.stderr) {
+				t.Fatalf("failure = %#v, %v", failure, err)
+			}
+		})
+	}
+}
+
 func TestCodexModelCatalogInitializesPaginatesAndIgnoresNotifications(t *testing.T) {
 	t.Parallel()
 	executable, err := os.Executable()
@@ -146,6 +196,18 @@ func TestCodexModelCatalogRejectsMalformedProtocol(t *testing.T) {
 	}
 	_, err = runCodexModelCatalog(context.Background(), executable, t.TempDir(), map[string]string{"GO_WANT_CODEX_CATALOG_HELPER": "malformed"})
 	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCodexModelCatalogEnforcesCumulativeOutputLimit(t *testing.T) {
+	t.Parallel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runCodexModelCatalog(context.Background(), executable, t.TempDir(), map[string]string{"GO_WANT_CODEX_CATALOG_HELPER": "output-limit"})
+	if err == nil || !strings.Contains(err.Error(), "output exceeded 4 MiB") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -188,6 +250,13 @@ func runCodexCatalogHelper(mode string) {
 		case "model/list":
 			if mode == "cancel" {
 				time.Sleep(time.Hour)
+			}
+			if mode == "output-limit" {
+				payload := strings.Repeat("x", 32<<10)
+				for index := 0; index < 129; index++ {
+					_ = encoder.Encode(map[string]any{"method": "catalog/progress", "params": payload})
+				}
+				continue
 			}
 			_ = encoder.Encode(map[string]any{"method": "account/updated", "params": map[string]any{}})
 			if request.Params.Cursor == "" {

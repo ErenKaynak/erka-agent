@@ -49,6 +49,10 @@ type connectionResult struct {
 }
 
 func Load(ctx context.Context, resolved config.Resolved, factory Factory) Result {
+	return load(ctx, resolved, factory, DiscoveryTimeout)
+}
+
+func load(ctx context.Context, resolved config.Resolved, factory Factory, timeout time.Duration) Result {
 	connections := configuredConnections(resolved)
 	results := make(chan connectionResult, len(connections))
 	var wait sync.WaitGroup
@@ -58,7 +62,7 @@ func Load(ctx context.Context, resolved config.Resolved, factory Factory) Result
 			wait.Add(1)
 			go func() {
 				defer wait.Done()
-				queryCtx, cancel := context.WithTimeout(ctx, DiscoveryTimeout)
+				queryCtx, cancel := context.WithTimeout(ctx, timeout)
 				defer cancel()
 				catalog, err := factory(queryCtx, name, connection, representativeModel(resolved, name, connection))
 				if err != nil {

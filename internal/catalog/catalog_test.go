@@ -3,7 +3,9 @@ package catalog
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
@@ -12,6 +14,12 @@ import (
 type staticCatalog struct {
 	models []erkaruntime.ModelInfo
 	err    error
+}
+
+type catalogFunc func(context.Context) ([]erkaruntime.ModelInfo, error)
+
+func (function catalogFunc) ListModels(ctx context.Context) ([]erkaruntime.ModelInfo, error) {
+	return function(ctx)
 }
 
 func (catalog staticCatalog) ListModels(context.Context) ([]erkaruntime.ModelInfo, error) {
@@ -103,6 +111,70 @@ func TestLoadOrdersStagesAndModelsDeterministically(t *testing.T) {
 	for index := range want {
 		if got[index] != want[index] {
 			t.Fatalf("ordered entries = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestLoadDiscoversConnectionsConcurrently(t *testing.T) {
+	resolved := catalogFixture()
+	started := make(chan string, len(resolved.Connections))
+	release := make(chan struct{})
+	var once sync.Once
+	result := load(context.Background(), resolved, func(_ context.Context, name string, _ config.Connection, _ string) (erkaruntime.ModelCatalog, error) {
+		return catalogFunc(func(ctx context.Context) ([]erkaruntime.ModelInfo, error) {
+			started <- name
+			if len(started) == len(resolved.Connections) {
+				once.Do(func() { close(release) })
+			}
+			select {
+			case <-release:
+				return []erkaruntime.ModelInfo{{ID: name + "-model"}}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}), nil
+	}, 250*time.Millisecond)
+	if len(result.Issues) != 0 || len(started) != len(resolved.Connections) {
+		t.Fatalf("concurrent discovery = started %d, result %#v", len(started), result)
+	}
+}
+
+func TestLoadAppliesDiscoveryTimeout(t *testing.T) {
+	resolved := catalogFixture()
+	result := load(context.Background(), resolved, func(context.Context, string, config.Connection, string) (erkaruntime.ModelCatalog, error) {
+		return catalogFunc(func(ctx context.Context) ([]erkaruntime.ModelInfo, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}), nil
+	}, 20*time.Millisecond)
+	if len(result.Issues) != len(resolved.Connections) {
+		t.Fatalf("timeout issues = %#v", result.Issues)
+	}
+	for _, issue := range result.Issues {
+		if !errors.Is(issue.Err, context.DeadlineExceeded) {
+			t.Fatalf("%s timeout = %v", issue.Connection, issue.Err)
+		}
+	}
+}
+
+func TestLoadUsesTenSecondProductionDeadline(t *testing.T) {
+	resolved := catalogFixture()
+	deadlines := make(chan time.Duration, len(resolved.Connections))
+	result := Load(context.Background(), resolved, func(ctx context.Context, _ string, _ config.Connection, _ string) (erkaruntime.ModelCatalog, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return nil, errors.New("discovery context has no deadline")
+		}
+		deadlines <- time.Until(deadline)
+		return staticCatalog{models: []erkaruntime.ModelInfo{{ID: "available"}}}, nil
+	})
+	if len(result.Issues) != 0 {
+		t.Fatalf("discovery issues = %#v", result.Issues)
+	}
+	close(deadlines)
+	for remaining := range deadlines {
+		if remaining < 9*time.Second || remaining > DiscoveryTimeout {
+			t.Fatalf("discovery deadline = %s, want approximately %s", remaining, DiscoveryTimeout)
 		}
 	}
 }
