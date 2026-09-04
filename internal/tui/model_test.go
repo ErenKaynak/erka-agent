@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -326,6 +327,53 @@ func TestModelPickerKeepsDisabledUnpricedModelUnselected(t *testing.T) {
 	model.Update(key("enter"))
 	if controller.model.Model != "" || model.overlay != "models" || model.status != "configure model pricing" {
 		t.Fatalf("disabled selection = %#v, overlay %q, status %q", controller.model, model.overlay, model.status)
+	}
+}
+
+func TestModelPickerShowsEmptyCatalog(t *testing.T) {
+	model := NewModel(Options{Controller: &fakeController{}, Models: func(context.Context) ([]ModelOption, []string, error) {
+		return nil, nil, nil
+	}})
+	command := runSlash(t, model, "/model")
+	model.Update(command())
+	if model.overlay != "models" || len(model.modelOptions) != 0 || !strings.Contains(model.View().Content, "No matching models.") {
+		t.Fatalf("empty model picker = overlay %q, options %#v, view:\n%s", model.overlay, model.modelOptions, model.View().Content)
+	}
+}
+
+func TestModelPickerReportsTotalDiscoveryError(t *testing.T) {
+	model := NewModel(Options{Controller: &fakeController{}, Models: func(context.Context) ([]ModelOption, []string, error) {
+		return nil, []string{"coder: offline"}, errors.New("no models available")
+	}})
+	command := runSlash(t, model, "/model")
+	model.Update(command())
+	if model.overlay != "" || model.status != "model discovery failed" || !strings.Contains(model.errText, "no models available") {
+		t.Fatalf("discovery error = overlay %q, status %q, error %q", model.overlay, model.status, model.errText)
+	}
+}
+
+func TestModelPickerRejectsSelectionDuringActiveTurn(t *testing.T) {
+	controller := &fakeController{}
+	model := NewModel(Options{Controller: controller})
+	model.modelOptions = []ModelOption{{Stage: erkaruntime.StageCoding, Connection: "coder", ID: "deepseek-v4-pro", Selectable: true}}
+	model.modelFiltered = []int{0}
+	model.overlay = "models"
+	model.active = true
+	model.Update(key("enter"))
+	if controller.model.Model != "" || model.overlay != "" || model.status != "cancel the active turn before switching models" {
+		t.Fatalf("active picker selection = %#v, overlay %q, status %q", controller.model, model.overlay, model.status)
+	}
+}
+
+func TestModelDiscoveryResultDoesNotOpenPickerDuringActiveTurn(t *testing.T) {
+	model := NewModel(Options{Controller: &fakeController{}, Models: func(context.Context) ([]ModelOption, []string, error) {
+		return []ModelOption{{Stage: erkaruntime.StageCoding, Connection: "coder", ID: "deepseek-v4-pro", Selectable: true}}, nil, nil
+	}})
+	command := runSlash(t, model, "/model")
+	model.active = true
+	model.Update(command())
+	if model.overlay != "" || model.status != "cancel the active turn before switching models" {
+		t.Fatalf("late discovery result = overlay %q, status %q", model.overlay, model.status)
 	}
 }
 

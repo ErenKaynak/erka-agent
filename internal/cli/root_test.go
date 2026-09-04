@@ -316,3 +316,30 @@ func TestModelsCommandListsLiveAndConfiguredModels(t *testing.T) {
 		position += next + 1
 	}
 }
+
+func TestModelsCommandPrintsPartialDiscoveryWarningAndSucceeds(t *testing.T) {
+	previous := discoverConfiguredModels
+	discoverConfiguredModels = func(context.Context, config.Resolved, *auth.Manager) catalog.Result {
+		return catalog.Result{
+			Entries: []catalog.Entry{{Stage: erkaruntime.StageCoding, Connection: "coder", Class: config.ConnectionNative, Provider: "deepseek", Model: erkaruntime.ModelInfo{ID: "deepseek-v4-flash"}, Source: "configured", State: "configured", Selectable: true}},
+			Issues:  []catalog.Issue{{Connection: "chatgpt", Err: errors.New("login required\nretry")}},
+		}
+	}
+	t.Cleanup(func() { discoverConfiguredModels = previous })
+	stdout, stderr, code := executeForTestWithLoader(t, func(context.Context, config.Options) (config.Resolved, error) { return config.Resolved{}, nil }, "models")
+	if code != 0 || !strings.Contains(stdout, "deepseek-v4-flash") || !strings.Contains(stderr, "Warning: chatgpt model discovery failed: login required retry") {
+		t.Fatalf("partial models command = code %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
+
+func TestModelsCommandReturnsNonzeroForEmptyCatalog(t *testing.T) {
+	previous := discoverConfiguredModels
+	discoverConfiguredModels = func(context.Context, config.Resolved, *auth.Manager) catalog.Result {
+		return catalog.Result{}
+	}
+	t.Cleanup(func() { discoverConfiguredModels = previous })
+	stdout, stderr, code := executeForTestWithLoader(t, func(context.Context, config.Options) (config.Resolved, error) { return config.Resolved{}, nil }, "models")
+	if code == 0 || stdout != "" || !strings.Contains(stderr, "no configured or discovered models could be listed") {
+		t.Fatalf("empty models command = code %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}

@@ -307,6 +307,10 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.status = "model discovery failed"
 			return model, nil
 		}
+		if model.active {
+			model.status = "cancel the active turn before switching models"
+			return model, nil
+		}
 		model.modelOptions = message.options
 		for index := range model.modelOptions {
 			if selected := model.modelSelections[model.modelOptions[index].Stage]; selected != "" {
@@ -438,9 +442,6 @@ func (model *Model) loadModels() tea.Cmd {
 	}
 	return func() tea.Msg {
 		options, issues, err := model.models(model.ctx)
-		if err == nil && len(options) == 0 {
-			err = errors.New("no configured stage has an available model")
-		}
 		return modelsMsg{options: options, issues: issues, err: err}
 	}
 }
@@ -618,6 +619,11 @@ func (model *Model) handleOverlay(key string) (tea.Model, tea.Cmd) {
 				model.refilterModels()
 			}
 		case "enter":
+			if model.active {
+				model.overlay = ""
+				model.status = "cancel the active turn before switching models"
+				return model, nil
+			}
 			if len(model.modelFiltered) == 0 {
 				return model, nil
 			}
