@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,6 +20,10 @@ func TestSQLiteDSNPlacesWindowsDriveInURLPath(t *testing.T) {
 	dsn := sqliteDSN(`C:\Users\erka\state\erka.db`)
 	if !strings.HasPrefix(dsn, "file:///C:/Users/erka/state/erka.db?") {
 		t.Fatalf("sqliteDSN() = %q", dsn)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil || parsed.Query().Get("_txlock") != "immediate" {
+		t.Fatalf("sqliteDSN() transaction locking = %q, %v", parsed.Query().Get("_txlock"), err)
 	}
 }
 

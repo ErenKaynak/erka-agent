@@ -205,6 +205,67 @@ func (store *SQLite) FinishServerTask(ctx context.Context, taskID erkaruntime.Ta
 	return nil
 }
 
+func (store *SQLite) CompleteServerTaskWithApproval(ctx context.Context, taskID erkaruntime.TaskID, holder string, approval Approval) error {
+	if approval.TaskID != taskID {
+		return errors.New("completion approval identifies a different task")
+	}
+	if err := validateApproval(approval); err != nil {
+		return err
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE server_tasks SET status = 'completed', claim_holder = NULL, claim_expires_at = NULL, updated_at = ? WHERE task_id = ? AND status = 'running' AND claim_holder = ?`, formatTime(approval.RequestedAt), taskID, holder)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return erkaruntime.ErrConflict
+	}
+	var expires any
+	if !approval.ExpiresAt.IsZero() {
+		expires = formatTime(approval.ExpiresAt)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO approvals(id, task_id, kind, message, status, requested_at, expires_at) VALUES(?, ?, ?, ?, ?, ?, ?)`, approval.ID, approval.TaskID, approval.Kind, approval.Message, approval.Status, formatTime(approval.RequestedAt), expires)
+	if err != nil {
+		return mapInsertError(err, "approval", approval.ID)
+	}
+	return tx.Commit()
+}
+
+func (store *SQLite) ReleaseServerTaskClaim(ctx context.Context, taskID erkaruntime.TaskID, holder string, now time.Time) error {
+	result, err := store.db.ExecContext(ctx, `UPDATE server_tasks SET status = 'queued', claim_holder = NULL, claim_expires_at = NULL, updated_at = ? WHERE task_id = ? AND status = 'running' AND claim_holder = ?`, formatTime(now), taskID, holder)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return erkaruntime.ErrConflict
+	}
+	return nil
+}
+
+func (store *SQLite) QueueServerTask(ctx context.Context, taskID erkaruntime.TaskID, now time.Time) error {
+	result, err := store.db.ExecContext(ctx, `UPDATE server_tasks SET status = 'queued', claim_holder = NULL, claim_expires_at = NULL, updated_at = ? WHERE task_id = ? AND status IN ('waiting', 'completed', 'failed')`, formatTime(now), taskID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return erkaruntime.ErrConflict
+	}
+	return nil
+}
+
+func (store *SQLite) CancelServerTask(ctx context.Context, taskID erkaruntime.TaskID, now time.Time) (bool, error) {
+	result, err := store.db.ExecContext(ctx, `UPDATE server_tasks SET status = 'cancelled', claim_holder = NULL, claim_expires_at = NULL, updated_at = ? WHERE task_id = ? AND status IN ('queued', 'waiting')`, formatTime(now), taskID)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
 func (store *SQLite) CreateApproval(ctx context.Context, approval Approval) error {
 	if err := validateApproval(approval); err != nil {
 		return err

@@ -84,6 +84,10 @@ func sqliteDSN(filename string) string {
 	query.Set("_foreign_keys", "on")
 	query.Set("_journal_mode", "WAL")
 	query.Set("_synchronous", "NORMAL")
+	// Runtime commits read the current task snapshot before writing a durable
+	// batch. Beginning write transactions eagerly prevents a concurrent server
+	// lease heartbeat from invalidating that snapshot with SQLITE_BUSY_SNAPSHOT.
+	query.Set("_txlock", "immediate")
 	location.RawQuery = query.Encode()
 	return location.String()
 }

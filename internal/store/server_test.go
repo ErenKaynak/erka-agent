@@ -46,14 +46,15 @@ func TestServerProjectTaskClaimRecoveryAndApproval(t *testing.T) {
 	if err != nil || !ok || recovered.ClaimHolder != "worker-two" {
 		t.Fatalf("expired recovery = %#v, %v, %v", recovered, ok, err)
 	}
-	if err := db.FinishServerTask(ctx, "task-1", "worker-one", ServerTaskCompleted, now.Add(2*time.Minute)); !errors.Is(err, erkaruntime.ErrConflict) {
+	staleApproval := Approval{ID: "stale-approval", TaskID: "task-1", Kind: "accept_changes", Message: "Must roll back", Status: ApprovalPending, RequestedAt: now.Add(2 * time.Minute), ExpiresAt: now.Add(time.Hour)}
+	if err := db.CompleteServerTaskWithApproval(ctx, "task-1", "worker-one", staleApproval); !errors.Is(err, erkaruntime.ErrConflict) {
 		t.Fatalf("stale worker finish = %v", err)
 	}
-	if err := db.FinishServerTask(ctx, "task-1", "worker-two", ServerTaskCompleted, now.Add(3*time.Minute)); err != nil {
-		t.Fatal(err)
+	if _, err := db.LoadApproval(ctx, staleApproval.ID); !errors.Is(err, erkaruntime.ErrNotFound) {
+		t.Fatalf("stale completion persisted approval: %v", err)
 	}
 	approval := Approval{ID: "approval-1", TaskID: "task-1", Kind: "accept_changes", Message: "Accept the worktree diff", Status: ApprovalPending, RequestedAt: now.Add(3 * time.Minute), ExpiresAt: now.Add(time.Hour)}
-	if err := db.CreateApproval(ctx, approval); err != nil {
+	if err := db.CompleteServerTaskWithApproval(ctx, "task-1", "worker-two", approval); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.DecideApproval(ctx, approval.ID, "owner", ApprovalApproved, now.Add(4*time.Minute)); err != nil {
