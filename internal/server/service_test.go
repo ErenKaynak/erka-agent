@@ -88,8 +88,11 @@ func TestGitWorktreeRejectsExistingDestinationAndKeepsSourceClean(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(destination, "fixture.txt"), []byte("changed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(destination, "new.txt"), []byte("new content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	diff, err := manager.Diff(ctx, destination)
-	if err != nil || !strings.Contains(diff, "+changed") {
+	if err != nil || !strings.Contains(diff, "+changed") || !strings.Contains(diff, "+new content") {
 		t.Fatalf("diff = %q, %v", diff, err)
 	}
 	data, err := os.ReadFile(filepath.Join(source, "fixture.txt"))

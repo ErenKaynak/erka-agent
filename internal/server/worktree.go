@@ -22,6 +22,8 @@ type WorktreeManager interface {
 
 type GitWorktrees struct{}
 
+const maxWorktreeDiffBytes = 1 << 20
+
 func (GitWorktrees) Validate(ctx context.Context, source, ref string) error {
 	if !filepath.IsAbs(source) || strings.TrimSpace(ref) == "" {
 		return errors.New("worktree source must be absolute and ref must not be empty")
@@ -77,14 +79,39 @@ func (GitWorktrees) Diff(ctx context.Context, worktree string) (string, error) {
 	if !filepath.IsAbs(worktree) {
 		return "", errors.New("worktree diff requires an absolute path")
 	}
-	result, err := runGit(ctx, worktree, []string{"diff", "--no-ext-diff", "--no-color", "--"}, time.Minute)
+	result, err := runGit(ctx, worktree, []string{"diff", "--no-ext-diff", "--no-color", "HEAD", "--"}, time.Minute)
 	if err != nil {
 		return "", err
 	}
 	if result.ExitCode != 0 {
 		return "", fmt.Errorf("read Git worktree diff: %s", commandMessage(result))
 	}
-	return result.StandardOutput, nil
+	combined := result.StandardOutput
+	status, err := runGit(ctx, worktree, []string{"status", "--porcelain=v1", "-z", "--untracked-files=all"}, time.Minute)
+	if err != nil {
+		return "", err
+	}
+	if status.ExitCode != 0 {
+		return "", fmt.Errorf("read Git worktree status: %s", commandMessage(status))
+	}
+	for _, entry := range strings.Split(status.StandardOutput, "\x00") {
+		if !strings.HasPrefix(entry, "?? ") {
+			continue
+		}
+		path := strings.TrimPrefix(entry, "?? ")
+		untracked, runErr := runGit(ctx, worktree, []string{"diff", "--no-index", "--no-color", "--", os.DevNull, path}, time.Minute)
+		if runErr != nil {
+			return "", runErr
+		}
+		if untracked.ExitCode != 0 && untracked.ExitCode != 1 {
+			return "", fmt.Errorf("read untracked worktree diff: %s", commandMessage(untracked))
+		}
+		combined += untracked.StandardOutput
+		if len(combined) >= maxWorktreeDiffBytes {
+			return combined[:maxWorktreeDiffBytes] + "\n[diff truncated]\n", nil
+		}
+	}
+	return combined, nil
 }
 
 func runGit(ctx context.Context, directory string, arguments []string, timeout time.Duration) (erkaruntime.CommandResult, error) {
