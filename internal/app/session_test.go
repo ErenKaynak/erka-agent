@@ -425,6 +425,134 @@ func TestSetModelOverridesStagesBeforeRunCreationAndPreservesFallbacks(t *testin
 	}
 }
 
+func TestSetModelOverridesAreIsolatedAcrossAllFiveStages(t *testing.T) {
+	stages := []erkaruntime.Stage{
+		erkaruntime.StagePlanning, erkaruntime.StageCoding, erkaruntime.StageValidation,
+		erkaruntime.StageRepair, erkaruntime.StageReview,
+	}
+	routes := make(map[string]config.StageRoute, len(stages))
+	for _, stage := range stages {
+		routes[string(stage)] = config.StageRoute{Candidates: []string{"native/" + string(stage) + "-default"}}
+	}
+	resolved := config.Resolved{
+		ActivePipeline: "default",
+		Connections:    map[string]config.Connection{"native": {Class: config.ConnectionNative, Provider: "deepseek"}},
+		Pipelines:      map[string]config.Pipeline{"default": {Stages: routes}},
+	}
+	for _, selectedStage := range stages {
+		selectedStage := selectedStage
+		t.Run(string(selectedStage), func(t *testing.T) {
+			session := &Session{options: SessionOptions{Pipeline: resolved}}
+			selected := "native/" + string(selectedStage) + "-selected"
+			if err := session.SetModel(erkaruntime.ModelSelection{Stage: selectedStage, Connection: "native", Model: string(selectedStage) + "-selected"}); err != nil {
+				t.Fatal(err)
+			}
+			for pass := 0; pass < 2; pass++ {
+				effective := session.effectivePipeline()
+				for _, stage := range stages {
+					candidates := effective.Pipelines["default"].Stages[string(stage)].Candidates
+					configured := "native/" + string(stage) + "-default"
+					if stage == selectedStage {
+						if len(candidates) != 2 || candidates[0] != selected || candidates[1] != configured {
+							t.Fatalf("pass %d %s candidates = %#v", pass, stage, candidates)
+						}
+					} else if len(candidates) != 1 || candidates[0] != configured {
+						t.Fatalf("pass %d override for %s leaked into %s: %#v", pass, selectedStage, stage, candidates)
+					}
+				}
+			}
+			fresh := (&Session{options: SessionOptions{Pipeline: resolved}}).effectivePipeline()
+			if got := fresh.Pipelines["default"].Stages[string(selectedStage)].Candidates; len(got) != 1 || got[0] != "native/"+string(selectedStage)+"-default" {
+				t.Fatalf("override escaped its session: %#v", got)
+			}
+		})
+	}
+}
+
+func TestSetModelBridgeDefaultClearsSessionOverride(t *testing.T) {
+	resolved := config.Resolved{
+		ActivePipeline: "default",
+		Connections: map[string]config.Connection{
+			"chatgpt": {Class: config.ConnectionSubscriptionBridge, Provider: "codex"},
+		},
+		Pipelines: map[string]config.Pipeline{"default": {Stages: map[string]config.StageRoute{
+			"planning": {Candidates: []string{"chatgpt/default"}},
+		}}},
+	}
+	session := &Session{options: SessionOptions{Pipeline: resolved}}
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StagePlanning, Connection: "chatgpt", Model: "gpt-5.6-sol"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StagePlanning, Connection: "chatgpt", Model: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.modelOverrides) != 0 {
+		t.Fatalf("default reset retained overrides: %#v", session.modelOverrides)
+	}
+	candidates := session.effectivePipeline().Pipelines["default"].Stages["planning"].Candidates
+	if len(candidates) != 1 || candidates[0] != "chatgpt/default" {
+		t.Fatalf("planning candidates after default reset = %#v", candidates)
+	}
+}
+
+func TestSelectedModelOverrideFallsBackToConfiguredRoute(t *testing.T) {
+	root, state := t.TempDir(), t.TempDir()
+	writeFixture(t, root)
+	initRepository(t, root)
+	planner := &scriptedProvider{name: "openai", responses: [][]erkaruntime.ModelOutput{{
+		{Kind: erkaruntime.ModelTextDelta, Text: "Fallback plan."}, {Kind: erkaruntime.ModelCompleted},
+	}}}
+	coder := &scriptedProvider{name: "deepseek", responses: [][]erkaruntime.ModelOutput{{
+		{Kind: erkaruntime.ModelTextDelta, Text: "Implemented fallback plan."}, {Kind: erkaruntime.ModelCompleted},
+	}}}
+	resolved := testSessionPipeline()
+	session, err := OpenSession(context.Background(), SessionOptions{
+		WorkingDirectory: root, StateDir: state, Pipeline: resolved,
+		ProviderFactory: func(_ context.Context, candidate routing.Candidate) (erkaruntime.ModelProvider, error) {
+			switch candidate.Reference {
+			case "planner/gpt-selected":
+				return nil, &erkaruntime.ProviderError{Code: "selected_unavailable", Message: "selected model is temporarily unavailable", Retryable: true}
+			case "planner/gpt-test":
+				return planner, nil
+			case "coder/deepseek-test":
+				return coder, nil
+			default:
+				return nil, errors.New("unexpected route " + candidate.Reference)
+			}
+		},
+		IDs: &sequenceIDs{}, Clock: fixedClock,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StagePlanning, Connection: "planner", Model: "gpt-selected"}); err != nil {
+		t.Fatal(err)
+	}
+	taskID, err := session.Submit(context.Background(), "", "exercise selected fallback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, claimed, err := session.RunNext(context.Background())
+	if err != nil || !claimed || result.Status != erkaruntime.TaskCompleted {
+		t.Fatalf("RunNext() = %#v, %v, %v", result, claimed, err)
+	}
+	conversation, err := session.OpenConversation(context.Background(), taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conversation.Runs) != 3 {
+		t.Fatalf("fallback runs = %#v", conversation.Runs)
+	}
+	selected, fallback := conversation.Runs[0], conversation.Runs[1]
+	if selected.Model != "gpt-selected" || selected.Status != erkaruntime.RunFailed || selected.FailureCode != "provider_open_failed" {
+		t.Fatalf("selected run = %#v", selected)
+	}
+	if fallback.Model != "gpt-test" || fallback.Status != erkaruntime.RunCompleted || fallback.Attempt != 2 {
+		t.Fatalf("fallback run = %#v", fallback)
+	}
+}
+
 func TestSetModelPreservesOpenCodeProviderQualifiedModel(t *testing.T) {
 	session := &Session{options: SessionOptions{Pipeline: config.Resolved{
 		ActivePipeline: "default",

@@ -359,6 +359,46 @@ func TestSubscriptionBridgeIsRejectedForMutatingStagesAndSecrets(t *testing.T) {
 	}
 }
 
+func TestSubscriptionBridgeStageEligibility(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		stage   string
+		allowed bool
+	}{
+		{stage: "planning", allowed: true},
+		{stage: "coding", allowed: false},
+		{stage: "validation", allowed: false},
+		{stage: "repair", allowed: false},
+		{stage: "review", allowed: true},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.stage, func(t *testing.T) {
+			t.Parallel()
+			stages := map[string]StageRoute{
+				"planning": {Candidates: []string{"native/model"}},
+				"coding":   {Candidates: []string{"native/model"}},
+			}
+			stages[test.stage] = StageRoute{Candidates: []string{"bridge/default"}}
+			resolved := Resolved{
+				ActivePipeline: "default",
+				Connections: map[string]Connection{
+					"native": {Class: ConnectionNative, Provider: "deepseek"},
+					"bridge": {Class: ConnectionSubscriptionBridge, Provider: "codex"},
+				},
+				Pipelines: map[string]Pipeline{"default": {Routing: "fixed", Stages: stages}},
+			}
+			err := validateRouting(&resolved)
+			if test.allowed && err != nil {
+				t.Fatalf("bridge rejected for %s: %v", test.stage, err)
+			}
+			if !test.allowed && (err == nil || !strings.Contains(err.Error(), "cannot use subscription bridge")) {
+				t.Fatalf("bridge eligibility for %s = %v", test.stage, err)
+			}
+		})
+	}
+}
+
 func TestLoadPipelineSelectionPrecedence(t *testing.T) {
 	t.Parallel()
 	content := []byte(`version: 1
