@@ -334,6 +334,21 @@ func (store *SQLite) LoadEvents(ctx context.Context, taskID erkaruntime.TaskID, 
 	return events, nil
 }
 
+func (store *SQLite) LoadEventSequence(ctx context.Context, taskID erkaruntime.TaskID, eventID erkaruntime.EventID) (uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	var sequence uint64
+	err := store.db.QueryRowContext(ctx, `SELECT sequence FROM events WHERE task_id = ? AND id = ?`, taskID, eventID).Scan(&sequence)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("event %q for task %q: %w", eventID, taskID, erkaruntime.ErrNotFound)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("load event %q sequence: %w", eventID, err)
+	}
+	return sequence, nil
+}
+
 func (store *SQLite) Commit(ctx context.Context, request erkaruntime.CommitRequest) (batch erkaruntime.CommittedBatch, err error) {
 	if err := ctx.Err(); err != nil {
 		return batch, err

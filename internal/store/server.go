@@ -112,6 +112,20 @@ func (store *SQLite) ListServerProjects(ctx context.Context) ([]ServerProject, e
 	return result, rows.Err()
 }
 
+func (store *SQLite) UpdateServerProject(ctx context.Context, id, name, defaultRef string) error {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(name) == "" || strings.TrimSpace(defaultRef) == "" {
+		return errors.New("server project update requires ID, name, and default ref")
+	}
+	result, err := store.db.ExecContext(ctx, `UPDATE server_projects SET name = ?, default_ref = ? WHERE id = ?`, strings.TrimSpace(name), strings.TrimSpace(defaultRef), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return fmt.Errorf("server project %q: %w", id, erkaruntime.ErrNotFound)
+	}
+	return nil
+}
+
 func (store *SQLite) CreateServerTask(ctx context.Context, task ServerTask) error {
 	if err := validateServerTask(task, false); err != nil {
 		return err

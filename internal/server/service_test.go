@@ -172,6 +172,59 @@ func TestServiceRenewsClaimWhileTaskIsRunning(t *testing.T) {
 	}
 }
 
+func TestServiceRetryCreatesNewTurnAndRun(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	source := initSourceRepository(t)
+	state := t.TempDir()
+	database, err := store.OpenSQLite(ctx, filepath.Join(state, "erka.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	provider := &serverProvider{responses: [][]erkaruntime.ModelOutput{
+		{{Kind: erkaruntime.ModelFailed, Error: &erkaruntime.RuntimeError{Code: "temporary", Message: "retry", Retryable: true}}},
+		{{Kind: erkaruntime.ModelTextDelta, Text: "recovered"}, {Kind: erkaruntime.ModelCompleted}},
+	}}
+	openSession := func(ctx context.Context, root string) (TaskSession, error) {
+		return app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: root, StateDir: state, Provider: provider, NativeModel: "fixture"})
+	}
+	service, err := NewService(ServiceOptions{StateDir: state, Store: database, RuntimeStore: database, OpenSession: openSession})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := service.RegisterProject(ctx, "fixture", source, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.SubmitTask(ctx, project.ID, "retry the objective")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := service.ExecuteNext(ctx, "worker-1"); err == nil || !worked {
+		t.Fatalf("failed execution = %v, %v", worked, err)
+	}
+	failed, err := database.LoadServerTask(ctx, task.TaskID)
+	if err != nil || failed.Status != store.ServerTaskFailed {
+		t.Fatalf("failed server task = %#v, %v", failed, err)
+	}
+	if err := service.RetryTask(ctx, task.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := service.ExecuteNext(ctx, "worker-2"); err != nil || !worked {
+		t.Fatalf("retry execution = %v, %v", worked, err)
+	}
+	session, err := openSession(ctx, task.WorktreeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	conversation, err := session.OpenConversation(ctx, task.TaskID)
+	if err != nil || conversation.Task.Status != erkaruntime.TaskCompleted || len(conversation.Runs) != 2 || len(conversation.Turns) != 2 {
+		t.Fatalf("retried conversation = %#v, %v", conversation, err)
+	}
+}
+
 func initSourceRepository(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

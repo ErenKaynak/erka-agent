@@ -20,6 +20,7 @@ type ControlStore interface {
 	CreateServerProject(context.Context, store.ServerProject) error
 	LoadServerProject(context.Context, string) (store.ServerProject, error)
 	ListServerProjects(context.Context) ([]store.ServerProject, error)
+	UpdateServerProject(context.Context, string, string, string) error
 	CreateServerTask(context.Context, store.ServerTask) error
 	LoadServerTask(context.Context, erkaruntime.TaskID) (store.ServerTask, error)
 	ListServerTasks(context.Context, string) ([]store.ServerTask, error)
@@ -127,6 +128,29 @@ func (service *Service) RegisterProject(ctx context.Context, name, repositoryRoo
 	return project, nil
 }
 
+func (service *Service) UpdateProject(ctx context.Context, id string, name, defaultRef *string) (store.ServerProject, error) {
+	project, err := service.store.LoadServerProject(ctx, id)
+	if err != nil {
+		return store.ServerProject{}, err
+	}
+	if name != nil {
+		project.Name = strings.TrimSpace(*name)
+	}
+	if defaultRef != nil {
+		project.DefaultRef = strings.TrimSpace(*defaultRef)
+	}
+	if project.Name == "" || project.DefaultRef == "" {
+		return store.ServerProject{}, errors.New("server project name and default ref must not be empty")
+	}
+	if err := service.worktrees.Validate(ctx, project.RepositoryRoot, project.DefaultRef); err != nil {
+		return store.ServerProject{}, err
+	}
+	if err := service.store.UpdateServerProject(ctx, project.ID, project.Name, project.DefaultRef); err != nil {
+		return store.ServerProject{}, err
+	}
+	return project, nil
+}
+
 func (service *Service) SubmitTask(ctx context.Context, projectID, objective string) (store.ServerTask, error) {
 	objective = strings.TrimSpace(objective)
 	if objective == "" {
@@ -213,6 +237,33 @@ func (service *Service) CancelTask(ctx context.Context, taskID erkaruntime.TaskI
 	if !cancelled {
 		return erkaruntime.ErrConflict
 	}
+	return nil
+}
+
+func (service *Service) RetryTask(ctx context.Context, taskID erkaruntime.TaskID) error {
+	task, err := service.store.LoadServerTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task.Status != store.ServerTaskFailed {
+		return fmt.Errorf("task %q cannot be retried while %s: %w", taskID, task.Status, erkaruntime.ErrConflict)
+	}
+	snapshot, err := service.runtimeStore.LoadTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	session, err := service.openSession(ctx, task.WorktreeRoot)
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	if _, err := session.Submit(ctx, taskID, snapshot.Objective); err != nil {
+		return err
+	}
+	if err := service.store.QueueServerTask(ctx, taskID, service.clock().UTC()); err != nil {
+		return err
+	}
+	service.Wake()
 	return nil
 }
 
@@ -313,18 +364,25 @@ func (service *Service) ExecuteNext(ctx context.Context, holder string) (bool, e
 		_ = finish(store.ServerTaskFailed)
 		return true, err
 	}
-	if conversation.Task.Status == erkaruntime.TaskCompleted {
+	hasQueuedTurn := false
+	for _, turn := range conversation.Turns {
+		if turn.Status == store.TurnQueued {
+			hasQueuedTurn = true
+			break
+		}
+	}
+	if conversation.Task.Status == erkaruntime.TaskCompleted && !hasQueuedTurn {
 		if err := stopClaim(); err != nil {
 			return true, err
 		}
 		return true, service.completeClaim(context.Background(), task.TaskID, holder)
 	}
-	if conversation.Task.Status == erkaruntime.TaskFailed || conversation.Task.Status == erkaruntime.TaskCancelled || conversation.Task.Status == erkaruntime.TaskTimedOut {
+	if !hasQueuedTurn && (conversation.Task.Status == erkaruntime.TaskFailed || conversation.Task.Status == erkaruntime.TaskCancelled || conversation.Task.Status == erkaruntime.TaskTimedOut) {
 		return true, finish(store.ServerTaskFailed)
 	}
 
 	var result app.LocalResult
-	if len(conversation.Runs) == 0 {
+	if len(conversation.Runs) == 0 || hasQueuedTurn {
 		var claimed bool
 		result, claimed, err = session.RunNext(executionCtx)
 		if err == nil && !claimed {
