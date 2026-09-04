@@ -80,6 +80,33 @@ func TestLoadDisablesUnpricedDiscoveredModelForCostBudget(t *testing.T) {
 	assertCatalogEntry(t, result, erkaruntime.StageCoding, "coder", "deepseek-v4-pro", "live", false, false)
 }
 
+func TestLoadOrdersStagesAndModelsDeterministically(t *testing.T) {
+	resolved := catalogFixture()
+	result := Load(context.Background(), resolved, func(_ context.Context, name string, _ config.Connection, _ string) (erkaruntime.ModelCatalog, error) {
+		if name == "chatgpt" {
+			return staticCatalog{models: []erkaruntime.ModelInfo{{ID: "z-model"}, {ID: "a-model", Default: true}}}, nil
+		}
+		return staticCatalog{models: []erkaruntime.ModelInfo{{ID: "z-model"}, {ID: "a-model"}}}, nil
+	})
+	got := make([]string, 0, len(result.Entries))
+	for _, entry := range result.Entries {
+		got = append(got, string(entry.Stage)+":"+entry.Connection+"/"+entry.Model.ID)
+	}
+	want := []string{
+		"planning:chatgpt/default", "planning:chatgpt/a-model", "planning:chatgpt/z-model",
+		"coding:coder/deepseek-v4-flash", "coding:coder/a-model", "coding:coder/z-model",
+		"review:chatgpt/default", "review:chatgpt/a-model", "review:chatgpt/z-model",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ordered entries = %#v, want %#v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("ordered entries = %#v, want %#v", got, want)
+		}
+	}
+}
+
 func TestResultErrorsOnlyWhenNoModelCanBeListed(t *testing.T) {
 	if err := (Result{}).Error(); err == nil {
 		t.Fatal("empty catalog error = nil")

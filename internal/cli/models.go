@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -87,7 +88,7 @@ func newModelsCommand(load func(context.Context) (config.Resolved, error)) *cobr
 			if _, err := fmt.Fprintln(command.OutOrStdout(), "STAGE\tCONNECTION\tCLASS\tPROVIDER\tMODEL\tSOURCE\tSTATE"); err != nil {
 				return err
 			}
-			for _, entry := range result.Entries {
+			for _, entry := range cliModelEntries(result.Entries) {
 				stage := string(entry.Stage)
 				if stage == "" {
 					stage = "-"
@@ -114,6 +115,39 @@ func newModelsCommand(load func(context.Context) (config.Resolved, error)) *cobr
 			return nil
 		},
 	}
+}
+
+func cliModelEntries(entries []catalog.Entry) []catalog.Entry {
+	ordered := append([]catalog.Entry(nil), entries...)
+	stageOrder := map[erkaruntime.Stage]int{
+		erkaruntime.StagePlanning: 0, erkaruntime.StageCoding: 1, erkaruntime.StageValidation: 2,
+		erkaruntime.StageRepair: 3, erkaruntime.StageReview: 4,
+	}
+	sort.SliceStable(ordered, func(left, right int) bool {
+		a, b := ordered[left], ordered[right]
+		if a.Connection != b.Connection {
+			return a.Connection < b.Connection
+		}
+		aOrder, aKnown := stageOrder[a.Stage]
+		bOrder, bKnown := stageOrder[b.Stage]
+		if aKnown != bKnown {
+			return aKnown
+		}
+		if aOrder != bOrder {
+			return aOrder < bOrder
+		}
+		if a.Stage != b.Stage {
+			return a.Stage < b.Stage
+		}
+		if a.Current != b.Current {
+			return a.Current
+		}
+		if a.Model.Default != b.Model.Default {
+			return a.Model.Default
+		}
+		return a.Model.ID < b.Model.ID
+	})
+	return ordered
 }
 
 func appendState(state, value string) string {

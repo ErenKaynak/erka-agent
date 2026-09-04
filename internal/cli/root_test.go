@@ -287,8 +287,10 @@ func TestModelsCommandListsLiveAndConfiguredModels(t *testing.T) {
 	previous := discoverConfiguredModels
 	discoverConfiguredModels = func(context.Context, config.Resolved, *auth.Manager) catalog.Result {
 		return catalog.Result{Entries: []catalog.Entry{
-			{Stage: erkaruntime.StagePlanning, Connection: "coder", Class: config.ConnectionNative, Provider: "deepseek", Model: erkaruntime.ModelInfo{ID: "deepseek-v4-flash"}, Source: "configured+live", State: "available", Current: true, Selectable: true},
+			{Stage: erkaruntime.StageReview, Connection: "planner", Class: config.ConnectionNative, Provider: "openai", Model: erkaruntime.ModelInfo{ID: "gpt-review"}, Source: "live", State: "available", Selectable: true},
 			{Stage: erkaruntime.StageCoding, Connection: "coder", Class: config.ConnectionNative, Provider: "deepseek", Model: erkaruntime.ModelInfo{ID: "deepseek-v4-pro"}, Source: "live", State: "available", Selectable: true},
+			{Stage: erkaruntime.StagePlanning, Connection: "planner", Class: config.ConnectionNative, Provider: "openai", Model: erkaruntime.ModelInfo{ID: "gpt-plan"}, Source: "configured+live", State: "available", Current: true, Selectable: true},
+			{Stage: erkaruntime.StagePlanning, Connection: "coder", Class: config.ConnectionNative, Provider: "deepseek", Model: erkaruntime.ModelInfo{ID: "deepseek-v4-flash"}, Source: "configured+live", State: "available", Current: true, Selectable: true},
 		}}
 	}
 	t.Cleanup(func() { discoverConfiguredModels = previous })
@@ -301,5 +303,16 @@ func TestModelsCommandListsLiveAndConfiguredModels(t *testing.T) {
 		if !strings.Contains(stdout, fragment) {
 			t.Fatalf("models output missing %q:\n%s", fragment, stdout)
 		}
+	}
+	orderedRows := []string{
+		"planning\tcoder\t", "coding\tcoder\t", "planning\tplanner\t", "review\tplanner\t",
+	}
+	position := -1
+	for _, row := range orderedRows {
+		next := strings.Index(stdout[position+1:], row)
+		if next < 0 {
+			t.Fatalf("models output missing ordered row %q:\n%s", row, stdout)
+		}
+		position += next + 1
 	}
 }
