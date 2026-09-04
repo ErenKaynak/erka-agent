@@ -155,6 +155,11 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	root.AddCommand(newModelsCommand(func(ctx context.Context) (config.Resolved, error) {
 		return loadConfig(ctx, config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, APIKeyEnv: apiKeyEnv, Pipeline: pipeline, AllowFullExecution: allowFullExecution})
 	}))
+	loadServerConfig := func(ctx context.Context) (config.Resolved, error) {
+		return loadConfig(ctx, config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, APIKeyEnv: apiKeyEnv, Pipeline: pipeline, AllowFullExecution: allowFullExecution})
+	}
+	root.AddCommand(newServeCommand(loadServerConfig))
+	root.AddCommand(newServerCommand(loadServerConfig))
 	root.AddCommand(newRunCommand(func(ctx context.Context, prompt string, resume erkaruntime.TaskID, limits runLimits, output io.Writer) error {
 		limits.allowFullExecution = allowFullExecution
 		resolved, err := loadConfig(ctx, config.Options{

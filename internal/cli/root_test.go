@@ -54,7 +54,7 @@ func TestExecuteHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("Execute() code = %d, want 0; stderr = %q", code, stderr)
 	}
-	for _, fragment := range []string{"Usage:", "auth", "models", "providers", "run", "version", "--config", "--state-dir", "--pipeline"} {
+	for _, fragment := range []string{"Usage:", "auth", "models", "providers", "run", "serve", "server", "version", "--config", "--state-dir", "--pipeline"} {
 		if !strings.Contains(stdout, fragment) {
 			t.Errorf("Execute() help missing %q:\n%s", fragment, stdout)
 		}

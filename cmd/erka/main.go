@@ -9,8 +9,10 @@ import (
 )
 
 func main() {
+	ctx, stop := signalContext(context.Background())
+	defer stop()
 	code := cli.Execute(
-		context.Background(),
+		ctx,
 		os.Args[1:],
 		os.Stdout,
 		os.Stderr,
