@@ -110,6 +110,12 @@ func (client *Client) Projects(ctx context.Context) ([]Project, error) {
 	return response.Projects, nil
 }
 
+func (client *Client) CreateProject(ctx context.Context, name, repositoryRoot, defaultRef string) (Project, error) {
+	var project Project
+	err := client.doJSON(ctx, http.MethodPost, "/v1/projects", map[string]string{"name": name, "repositoryRoot": repositoryRoot, "defaultRef": defaultRef}, &project)
+	return project, err
+}
+
 func (client *Client) Run(ctx context.Context, projectID, objective string) (Task, error) {
 	var task Task
 	err := client.doJSON(ctx, http.MethodPost, "/v1/tasks", map[string]string{"projectId": projectID, "objective": objective}, &task)
@@ -142,6 +148,27 @@ func (client *Client) DecideApproval(ctx context.Context, approvalID, decision s
 	var approval Approval
 	err := client.doJSON(ctx, http.MethodPost, "/v1/approvals/"+url.PathEscape(approvalID)+"/decision", map[string]string{"decision": decision}, &approval)
 	return approval, err
+}
+
+func (client *Client) Approvals(ctx context.Context, taskID, status string) ([]Approval, error) {
+	query := url.Values{}
+	if strings.TrimSpace(taskID) != "" {
+		query.Set("taskId", strings.TrimSpace(taskID))
+	}
+	if strings.TrimSpace(status) != "" {
+		query.Set("status", strings.TrimSpace(status))
+	}
+	path := "/v1/approvals"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var response struct {
+		Approvals []Approval `json:"approvals"`
+	}
+	if err := client.doJSON(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Approvals, nil
 }
 
 func (client *Client) Watch(ctx context.Context, taskID, lastEventID string, receive func(Event) error) error {
@@ -234,7 +261,9 @@ func (client *Client) doJSON(ctx context.Context, method, path string, input, ou
 
 func (client *Client) request(ctx context.Context, method, path string, input any) (*http.Request, error) {
 	target := *client.baseURL
-	target.Path = strings.TrimRight(target.Path, "/") + path
+	requestPath, rawQuery, _ := strings.Cut(path, "?")
+	target.Path = strings.TrimRight(target.Path, "/") + requestPath
+	target.RawQuery = rawQuery
 	var body io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)

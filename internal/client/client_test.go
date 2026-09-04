@@ -67,6 +67,23 @@ func TestClientResumesAndParsesSSE(t *testing.T) {
 	}
 }
 
+func TestClientEncodesApprovalFilters(t *testing.T) {
+	t.Parallel()
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/v1/approvals" || request.URL.Query().Get("taskId") != "task/1" || request.URL.Query().Get("status") != "pending" {
+			t.Fatalf("approval URL = %s", request.URL)
+		}
+		return response(http.StatusOK, `{"approvals":[]}`), nil
+	})
+	remote, err := New("https://erka.example", "secret", &http.Client{Transport: transport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approvals, err := remote.Approvals(context.Background(), "task/1", "pending"); err != nil || len(approvals) != 0 {
+		t.Fatalf("approvals = %#v, %v", approvals, err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

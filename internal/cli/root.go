@@ -101,6 +101,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	var taskID string
 	var allowFullExecution bool
 	var pipeline string
+	var remoteProfile string
 
 	root := &cobra.Command{
 		Use:           "erka",
@@ -140,6 +141,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	root.PersistentFlags().StringVar(&baseURL, "provider-base-url", "", "provider API base URL")
 	root.PersistentFlags().StringVar(&apiKeyEnv, "api-key-env", "", "provider API key environment name (ERKA_API_KEY_ENV)")
 	root.PersistentFlags().StringVar(&pipeline, "pipeline", "", "configured fixed pipeline (ERKA_PIPELINE)")
+	root.PersistentFlags().StringVar(&remoteProfile, "profile", "", "remote server profile")
 	root.PersistentFlags().StringVar(
 		&stateDir,
 		"state-dir",
@@ -160,6 +162,10 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	}
 	root.AddCommand(newServeCommand(loadServerConfig))
 	root.AddCommand(newServerCommand(loadServerConfig))
+	root.AddCommand(newProfileCommand(loadServerConfig))
+	for _, command := range newRemoteCommands(loadServerConfig, func() string { return remoteProfile }) {
+		root.AddCommand(command)
+	}
 	root.AddCommand(newRunCommand(func(ctx context.Context, prompt string, resume erkaruntime.TaskID, limits runLimits, output io.Writer) error {
 		limits.allowFullExecution = allowFullExecution
 		resolved, err := loadConfig(ctx, config.Options{
@@ -177,6 +183,15 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 		})
 		if err != nil {
 			return fmt.Errorf("resolve configuration: %w", err)
+		}
+		if remoteProfile != "" {
+			if resume != "" {
+				return fmt.Errorf("%w: remote run does not accept --resume; use watch or retry", ErrUsage)
+			}
+			return runRemoteTask(ctx, resolved.StateDir, remoteProfile, limits.project, prompt, output)
+		}
+		if limits.project != "" {
+			return fmt.Errorf("%w: --project requires --profile", ErrUsage)
 		}
 		return runTask(ctx, resolved, prompt, resume, workingDirectory, output)
 	}))
@@ -207,6 +222,7 @@ type runLimits struct {
 	maxOutputTokens    int64
 	stageTimeout       time.Duration
 	allowFullExecution bool
+	project            string
 }
 
 func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimits, io.Writer) error) *cobra.Command {
@@ -240,6 +256,7 @@ func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimi
 	command.Flags().Int64Var(&limits.maxOutputTokens, "max-output-tokens", 0, "maximum output tokens per model request")
 	command.Flags().DurationVar(&limits.stageTimeout, "stage-timeout", 0, "overall stage timeout (ERKA_STAGE_TIMEOUT)")
 	command.Flags().DurationVar(&limits.stageTimeout, "timeout", 0, "overall stage timeout (alias for --stage-timeout)")
+	command.Flags().StringVar(&limits.project, "project", "", "remote server project ID")
 	return command
 }
 

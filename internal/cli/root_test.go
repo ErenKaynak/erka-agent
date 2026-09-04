@@ -136,6 +136,18 @@ func TestExecuteRejectsUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestRemoteCommandsRequireExplicitProfile(t *testing.T) {
+	t.Parallel()
+	_, stderr, code := executeForTest(t, "projects")
+	if code != 2 || !strings.Contains(stderr, "requires --profile") {
+		t.Fatalf("projects without profile = %d, %q", code, stderr)
+	}
+	_, stderr, code = executeForTest(t, "run", "--project", "shop", "fix")
+	if code != 2 || !strings.Contains(stderr, "--project requires --profile") {
+		t.Fatalf("remote project without profile = %d, %q", code, stderr)
+	}
+}
+
 func TestExecuteRunPassesConfigFlagsToLoader(t *testing.T) {
 	t.Parallel()
 
