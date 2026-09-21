@@ -348,6 +348,21 @@ Model-saved notes are labeled unverified; only you can add global memory.
 
 ## Remote operation over a VPN
 
+Run the server from the repository you want to work on:
+
+```bash
+erka serve
+```
+
+With no flags it listens on this computer and on your Tailscale or WireGuard
+address (never a plain LAN address), registers the current repository, and
+prints a QR code. Scan it with your phone, which must be on the same VPN, and
+the web app opens already paired; there are no tokens to copy. The one-time
+code expires after ten minutes. Pair another device later with
+`erka server pair`. Commands the model runs are sandboxed and ask you first.
+
+Everything below is optional configuration.
+
 `erka serve` runs tasks in isolated worktrees and can be driven from a laptop
 CLI profile or a phone. On a WireGuard or Tailscale network, listen on the
 server's VPN address and restrict clients to the VPN range; the tunnel encrypts

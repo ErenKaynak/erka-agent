@@ -119,11 +119,8 @@ func validateServer(server *Server) error {
 	if previews.PortMin < 1024 || previews.PortMax > 65535 || previews.PortMin > previews.PortMax {
 		return fmt.Errorf("server.previews port range must be within 1024-65535 and ordered")
 	}
-	if len(previews.Commands) > 0 {
-		ip := net.ParseIP(previews.BindAddress)
-		if ip == nil || ip.IsUnspecified() {
-			return fmt.Errorf("server.previews.commands require a specific bind_address, such as the server's VPN address")
-		}
+	if previews.BindAddress != "" && net.ParseIP(previews.BindAddress).IsUnspecified() {
+		return fmt.Errorf("server.previews.bind_address must be a specific address, such as the server's VPN address; leave it empty to use the detected one")
 	}
 	for name, command := range previews.Commands {
 		if strings.TrimSpace(name) == "" || len(command) == 0 || strings.TrimSpace(command[0]) == "" {
@@ -254,4 +251,10 @@ func validateSandbox(sandbox *Sandbox, home string) error {
 		sandbox.WritablePaths[index] = path
 	}
 	return nil
+}
+
+// CommandsNeedApproval reports whether commands are offered with per-call
+// consent. It defaults to true: commands are sandboxed and each one asks.
+func (resolved Resolved) CommandsNeedApproval() bool {
+	return resolved.ApproveCommands == nil || *resolved.ApproveCommands
 }

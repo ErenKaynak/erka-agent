@@ -162,7 +162,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 		return loadConfig(ctx, config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, APIKeyEnv: apiKeyEnv, Pipeline: pipeline, AllowFullExecution: allowFullExecution})
 	}
 	root.AddCommand(newMemoryCommand(loadServerConfig, func() string { return workingDirectory }))
-	root.AddCommand(newServeCommand(loadServerConfig))
+	root.AddCommand(newServeCommand(loadServerConfig, func() string { return workingDirectory }))
 	root.AddCommand(newServerCommand(loadServerConfig))
 	root.AddCommand(newProfileCommand(loadServerConfig))
 	for _, command := range newRemoteCommands(loadServerConfig, func() string { return remoteProfile }) {

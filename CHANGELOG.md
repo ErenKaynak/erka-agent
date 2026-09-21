@@ -36,6 +36,16 @@ configuration and API between minor releases.
   config read-only. Configure with `sandbox.mode`, `sandbox.network`, and
   `sandbox.writable_paths`; god mode bypasses it.
 - erka's file tools refuse to write repository metadata under `.git`.
+- `erka serve` works with no configuration: it listens on loopback and any
+  detected Tailscale or WireGuard address, trusts only those networks,
+  registers the current repository, and prints a QR code for one-time device
+  pairing (`/v1/pair`, single use, ten-minute expiry, rate limited).
+  `erka server pair` prints a new code.
+
+### Changed (serve)
+- The server offers `run_command` with per-call approval by default; set
+  `permissions.approve_commands: false` to hide it.
+- `--listen` now means "exactly this address"; the default is automatic.
 
 ### Changed
 - Interactive sessions offer `run_command` with per-call consent instead of

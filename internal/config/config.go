@@ -66,12 +66,14 @@ type Resolved struct {
 	MaxOutputTokens    int64
 	StageTimeout       time.Duration
 	AllowFullExecution bool
-	ApproveCommands    bool
-	ActivePipeline     string
-	Connections        map[string]Connection
-	Pipelines          map[string]Pipeline
-	Server             Server
-	Sandbox            Sandbox
+	// ApproveCommands offers run_command with per-call consent; nil means
+	// the default, on. Set false to hide commands unless full execution.
+	ApproveCommands *bool
+	ActivePipeline  string
+	Connections     map[string]Connection
+	Pipelines       map[string]Pipeline
+	Server          Server
+	Sandbox         Sandbox
 }
 
 // Connection names either a native provider endpoint or an explicitly labeled
@@ -179,8 +181,8 @@ type fileConfig struct {
 		StageTimeout    string `yaml:"stage_timeout,omitempty"`
 	} `yaml:"runtime,omitempty"`
 	Permissions struct {
-		AllowFullExecution bool `yaml:"allow_full_execution,omitempty"`
-		ApproveCommands    bool `yaml:"approve_commands,omitempty"`
+		AllowFullExecution bool  `yaml:"allow_full_execution,omitempty"`
+		ApproveCommands    *bool `yaml:"approve_commands,omitempty"`
 	} `yaml:"permissions,omitempty"`
 	Server  Server  `yaml:"server,omitempty"`
 	Sandbox Sandbox `yaml:"sandbox,omitempty"`

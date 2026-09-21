@@ -440,8 +440,12 @@ func (store *SQLite) CreateAPIToken(ctx context.Context, token APIToken) error {
 	if err := validateAPIToken(token); err != nil {
 		return err
 	}
+	return insertAPIToken(ctx, store.db, token)
+}
+
+func insertAPIToken(ctx context.Context, executor sqlExecutor, token APIToken) error {
 	scopes, _ := json.Marshal(normalizeScopes(token.Scopes))
-	_, err := store.db.ExecContext(ctx, `INSERT INTO server_api_tokens(id, name, token_hash, scopes_json, created_at) VALUES(?, ?, ?, ?, ?)`, token.ID, token.Name, token.Hash[:], scopes, formatTime(token.CreatedAt))
+	_, err := executor.ExecContext(ctx, `INSERT INTO server_api_tokens(id, name, token_hash, scopes_json, created_at) VALUES(?, ?, ?, ?, ?)`, token.ID, token.Name, token.Hash[:], scopes, formatTime(token.CreatedAt))
 	return mapInsertError(err, "API token", token.ID)
 }
 

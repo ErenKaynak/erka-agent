@@ -46,6 +46,7 @@ type APIOptions struct {
 	Pipelines    ResourceLoader
 	Previews     *PreviewManager
 	Memories     MemoryAPIStore
+	Pairings     PairingStore
 }
 
 type API struct {
@@ -59,6 +60,8 @@ type API struct {
 	pipelines    ResourceLoader
 	previews     *PreviewManager
 	memories     MemoryAPIStore
+	pairings     PairingStore
+	pairingLimit pairingLimiter
 	handler      http.Handler
 }
 
@@ -91,7 +94,7 @@ func NewAPI(options APIOptions) (*API, error) {
 		service: options.Service, store: options.Store, clock: options.Clock,
 		ssePoll: options.SSEPoll, sseHeartbeat: options.SSEHeartbeat,
 		connections: options.Connections, models: options.Models, pipelines: options.Pipelines,
-		previews: options.Previews, memories: options.Memories,
+		previews: options.Previews, memories: options.Memories, pairings: options.Pairings,
 	}
 	api.handler = api.routes()
 	return api, nil
@@ -102,6 +105,7 @@ func (api *API) Handler() http.Handler { return api.handler }
 func (api *API) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", api.health)
+	mux.HandleFunc("POST /v1/pair", api.pair)
 	mux.Handle("GET /app/", webappHandler())
 	mux.Handle("GET /{$}", http.RedirectHandler("/app/", http.StatusFound))
 	mux.Handle("GET /v1/me", api.authenticate("read", http.HandlerFunc(api.me)))

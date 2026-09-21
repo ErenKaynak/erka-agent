@@ -396,13 +396,24 @@ function memoryScreen() {
 }
 
 function settingsScreen() {
+  const code = h("input", { id: "code", autocomplete: "off", autocapitalize: "characters", placeholder: "XXXXX-XXXXX" });
+  const pairButton = h("button", { class: "primary" }, "Pair");
+  pairButton.addEventListener("click", async () => {
+    pairButton.disabled = true;
+    try { await pair(code.value.trim()); toast("This device is paired."); location.hash = "#/"; }
+    catch (error) { toast(error.message); pairButton.disabled = false; }
+  });
   const token = h("input", { id: "token", type: "password", autocomplete: "off", placeholder: "erka server token", value: storedToken() });
   const save = h("button", { class: "primary" }, "Save token");
   const clear = h("button", {}, "Forget token");
   const status = h("p", { class: "muted" });
   view.replaceChildren(h("h1", {}, "Settings"),
     h("div", { class: "card" },
-      h("p", {}, "Create a token on the server with ", h("code", {}, "erka server token create phone --scope read,write,approve"), " and paste it here. It is stored only in this browser."),
+      h("strong", {}, "Pair this device"),
+      h("p", { class: "muted" }, "Scan the QR code that erka serve prints, or type its code here. Run erka server pair for a new code."),
+      h("label", { for: "code" }, "Pairing code"), code, h("div", { class: "row gap-top" }, pairButton)),
+    h("div", { class: "card" },
+      h("p", { class: "muted" }, "Or paste an API token from erka server token create. It is stored only in this browser."),
       h("label", { for: "token" }, "API token"), token, h("div", { class: "row gap-top" }, save, clear), status));
   const check = async () => {
     try { const me = await api("GET", "/v1/me"); status.textContent = "Connected as " + (me.name || me.id) + " (" + me.scopes.join(", ") + ")"; }
@@ -413,9 +424,26 @@ function settingsScreen() {
   if (storedToken()) check();
 }
 
+// pair redeems a one-time pairing code for a device token. Codes arrive in
+// the URL fragment, which browsers never send to the server.
+async function pair(code) {
+  const device = /iPhone|iPad/.test(navigator.userAgent) ? "iPhone" : /Android/.test(navigator.userAgent) ? "Android phone" : "browser";
+  const response = await fetch("/v1/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, device }), cache: "no-store" });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error((data.error && data.error.message) || "Pairing failed");
+  saveToken(data.token);
+}
+
 function route() {
   timers.forEach(clearInterval);
   timers = [];
+  const pairing = (location.hash || "").match(/^#pair=([A-Za-z0-9-]{6,32})$/);
+  if (pairing) {
+    history.replaceState(null, "", location.pathname + "#/");
+    view.replaceChildren(h("p", { class: "empty" }, "Pairing this device…"));
+    pair(pairing[1]).then(() => { toast("This device is paired."); route(); }).catch((error) => { toast(error.message); location.hash = "#/settings"; });
+    return;
+  }
   const hash = location.hash || "#/";
   const task = hash.match(/^#\/tasks\/([^/]+)$/);
   const section = task ? "inbox" : ({ "#/new": "new", "#/memory": "memory", "#/settings": "settings" }[hash] || "inbox");

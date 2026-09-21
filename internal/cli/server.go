@@ -29,6 +29,8 @@ import (
 
 type serveOptions struct {
 	listen       string
+	port         int
+	directory    string
 	trustedCIDRs []string
 	tlsCert      string
 	tlsKey       string
@@ -43,21 +45,24 @@ var (
 	runServe      = serveConfigured
 )
 
-func newServeCommand(load func(context.Context) (config.Resolved, error)) *cobra.Command {
+func newServeCommand(load func(context.Context) (config.Resolved, error), workingDirectory func() string) *cobra.Command {
 	options := serveOptions{}
 	command := &cobra.Command{
 		Use:   "serve",
-		Short: "Run the optional authenticated personal server",
+		Short: "Run the personal server for your phone and other devices",
+		Long:  "Run the personal server. With no flags it listens on this computer and on your Tailscale or WireGuard address, registers the current repository, and prints a QR code to pair your phone.",
 		Args:  noArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			resolved, err := load(command.Context())
 			if err != nil {
 				return fmt.Errorf("resolve configuration: %w", err)
 			}
+			options.directory = workingDirectory()
 			return runServe(command.Context(), resolved, options, command.OutOrStdout())
 		},
 	}
-	command.Flags().StringVar(&options.listen, "listen", "127.0.0.1:7432", "HTTP listen address")
+	command.Flags().StringVar(&options.listen, "listen", "", "listen on exactly this address instead of loopback plus detected VPN addresses")
+	command.Flags().IntVar(&options.port, "port", defaultServePort, "port for the automatic listeners")
 	command.Flags().StringVar(&options.tlsCert, "tls-cert", "", "TLS certificate file")
 	command.Flags().StringVar(&options.tlsKey, "tls-key", "", "TLS private-key file")
 	command.Flags().StringSliceVar(&options.trustedCIDRs, "trusted-cidr", nil, "accept clients only from this network and allow plain HTTP on an address inside it (repeatable; for example a VPN range)")
@@ -74,6 +79,7 @@ func newServerCommand(load func(context.Context) (config.Resolved, error)) *cobr
 	token.AddCommand(newServerTokenCreateCommand(load))
 	token.AddCommand(newServerTokenRevokeCommand(load))
 	command.AddCommand(token)
+	command.AddCommand(newServerPairCommand(load))
 	return command
 }
 
@@ -188,13 +194,26 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 	if isRootProcess() {
 		return errors.New("erka serve refuses to run as the root OS user")
 	}
-	options.trustedCIDRs = append(append([]string(nil), resolved.Server.TrustedCIDRs...), options.trustedCIDRs...)
-	if err := validateServerListen(options); err != nil {
-		return err
+	plan := planServe(options, resolved)
+	for _, address := range plan.listen {
+		check := options
+		check.listen, check.trustedCIDRs = address, plan.trusted
+		if err := validateServerListen(check); err != nil {
+			return err
+		}
 	}
-	trusted, err := erkaserver.ParseTrustedNetworks(options.trustedCIDRs)
+	trusted, err := erkaserver.ParseTrustedNetworks(plan.trusted)
 	if err != nil {
 		return err
+	}
+	if resolved.Server.PublicURL == "" {
+		resolved.Server.PublicURL = plan.publicURL
+	}
+	if resolved.Server.Previews.BindAddress == "" {
+		resolved.Server.Previews.BindAddress = "127.0.0.1"
+		if host, _, err := net.SplitHostPort(strings.TrimPrefix(strings.TrimPrefix(plan.publicURL, "http://"), "https://")); err == nil && net.ParseIP(host) != nil {
+			resolved.Server.Previews.BindAddress = host
+		}
 	}
 	targets, err := erkaserver.NotificationTargets(resolved.Server, os.LookupEnv, nil)
 	if err != nil {
@@ -231,7 +250,7 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 	api, err := erkaserver.NewAPI(erkaserver.APIOptions{
 		Service: service, Store: database, SSEHeartbeat: options.heartbeat,
 		Connections: serverConnections(resolved), Models: serverModels(resolved, manager), Pipelines: serverPipelines(resolved),
-		Previews: previews, Memories: database,
+		Previews: previews, Memories: database, Pairings: database,
 	})
 	if err != nil {
 		return err
@@ -243,8 +262,27 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 			return err
 		}
 	}
+	listeners := make([]net.Listener, 0, len(plan.listen))
+	for _, address := range plan.listen {
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			for _, open := range listeners {
+				_ = open.Close()
+			}
+			return fmt.Errorf("listen on %s: %w", address, err)
+		}
+		listeners = append(listeners, listener)
+	}
+	project, created, err := ensureProject(ctx, service, database, options.directory)
+	if err != nil {
+		_, _ = fmt.Fprintf(output, "erka server: could not register the current repository: %v\n", err)
+	}
+	code, err := erkaserver.NewPairing(ctx, database, time.Now().UTC())
+	if err != nil {
+		return err
+	}
 	server := &http.Server{
-		Addr: options.listen, Handler: erkaserver.RestrictNetworks(api.Handler(), trusted), ReadHeaderTimeout: 10 * time.Second,
+		Handler: erkaserver.RestrictNetworks(api.Handler(), trusted), ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	workerCtx, cancelWorker := context.WithCancel(ctx)
@@ -256,18 +294,17 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 			_, _ = fmt.Fprintf(output, "erka notifications stopped: %v\n", err)
 		}
 	}()
-	if len(targets) > 0 {
-		_, _ = fmt.Fprintf(output, "erka notifications enabled for %d target(s)\n", len(targets))
+	listenResult := make(chan error, len(listeners))
+	for _, listener := range listeners {
+		go func(listener net.Listener) {
+			if options.tlsCert != "" {
+				listenResult <- server.ServeTLS(listener, options.tlsCert, options.tlsKey)
+				return
+			}
+			listenResult <- server.Serve(listener)
+		}(listener)
 	}
-	listenResult := make(chan error, 1)
-	go func() {
-		_, _ = fmt.Fprintf(output, "erka server listening on %s\n", options.listen)
-		if options.tlsCert != "" {
-			listenResult <- server.ListenAndServeTLS(options.tlsCert, options.tlsKey)
-			return
-		}
-		listenResult <- server.ListenAndServe()
-	}()
+	printServeBanner(output, plan, code, project, created, len(targets))
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -282,6 +319,7 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 		return fmt.Errorf("server worker: %w", err)
 	case err := <-listenResult:
 		cancelWorker()
+		_ = server.Close()
 		if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil {
 			return nil
 		}
@@ -326,7 +364,7 @@ func configuredServerSessionFactory(resolved config.Resolved, manager *auth.Mana
 			WorkingDirectory: root, StateDir: resolved.StateDir, Pipeline: resolved,
 			ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(),
 			Limits: nativeLimits(resolved), AllowFullExecution: resolved.AllowFullExecution,
-			Interactor: interactor, ApproveCommands: resolved.ApproveCommands,
+			Interactor: interactor, ApproveCommands: resolved.CommandsNeedApproval(),
 			Isolation: commandIsolation(resolved),
 		}
 		if resolved.ActivePipeline == "" {

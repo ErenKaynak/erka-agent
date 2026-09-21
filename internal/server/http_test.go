@@ -244,7 +244,7 @@ func newAPIFixtureWithProvider(t *testing.T, provider erkaruntime.ModelProvider)
 			t.Fatal(err)
 		}
 	}
-	api, err := NewAPI(APIOptions{Service: service, Store: database, SSEPoll: time.Millisecond, SSEHeartbeat: 10 * time.Millisecond})
+	api, err := NewAPI(APIOptions{Service: service, Store: database, SSEPoll: time.Millisecond, SSEHeartbeat: 10 * time.Millisecond, Pairings: database})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,5 +1,5 @@
 // Caches only the app shell. API responses are never cached.
-const SHELL = "erka-shell-v2";
+const SHELL = "erka-shell-v3";
 const FILES = ["./", "index.html", "app.css", "app.js", "manifest.webmanifest", "icon.svg"];
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(SHELL).then((cache) => cache.addAll(FILES)).then(() => self.skipWaiting()));
