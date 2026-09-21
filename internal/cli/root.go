@@ -135,6 +135,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	)
 	root.PersistentFlags().StringVar(&workingDirectory, "cwd", "", "repository working directory")
 	root.PersistentFlags().StringVar(&taskID, "task", "", "open a conversation by task ID")
+	root.PersistentFlags().StringVarP(&taskID, "session", "s", "", "resume a session by ID; a unique prefix is enough")
 	root.PersistentFlags().BoolVar(&allowFullExecution, "full", false, "allow arbitrary commands for this process")
 	root.PersistentFlags().StringVar(&providerName, "provider", "", "native provider name (ERKA_PROVIDER)")
 	root.PersistentFlags().StringVar(&model, "model", "", "model ID (ERKA_MODEL)")
@@ -160,6 +161,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	loadServerConfig := func(ctx context.Context) (config.Resolved, error) {
 		return loadConfig(ctx, config.Options{ConfigPath: configPath, StateDir: stateDir, Provider: providerName, Model: model, BaseURL: baseURL, APIKeyEnv: apiKeyEnv, Pipeline: pipeline, AllowFullExecution: allowFullExecution})
 	}
+	root.AddCommand(newMemoryCommand(loadServerConfig, func() string { return workingDirectory }))
 	root.AddCommand(newServeCommand(loadServerConfig))
 	root.AddCommand(newServerCommand(loadServerConfig))
 	root.AddCommand(newProfileCommand(loadServerConfig))
@@ -328,13 +330,20 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 			default:
 			}
 		})
-		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full})
+		prompter := tui.NewPrompter()
+		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, Interactor: prompter, ApproveCommands: true})
 		if err != nil {
 			return err
 		}
 		defer session.Close()
-		model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: "pipeline", Model: resolved.ActivePipeline, Branch: session.Branch(ctx), Full: options.Full, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
-		return tui.Run(model, input, output)
+		taskID, err := resolveSession(ctx, session, string(options.TaskID))
+		if err != nil {
+			return err
+		}
+		model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: taskID, Provider: "pipeline", Model: resolved.ActivePipeline, Branch: session.Branch(ctx), Full: options.Full, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved), Prompter: prompter})
+		runErr := tui.Run(model, input, output)
+		printResumeHint(context.Background(), output, session, model.TaskID())
+		return runErr
 	}
 	key, _, credentialErr := manager.Resolve(ctx, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
 	if credentialErr != nil {
@@ -371,13 +380,22 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 		default:
 		}
 	})
-	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider})
+	// An interactive session has a person present, so commands are offered
+	// with per-call consent instead of being hidden until full access.
+	prompter := tui.NewPrompter()
+	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider, Interactor: prompter, ApproveCommands: true})
 	if err != nil {
 		return err
 	}
 	defer session.Close()
-	model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: resolved.Provider, Model: resolved.Model, Branch: session.Branch(ctx), Full: options.Full, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
-	return tui.Run(model, input, output)
+	taskID, err := resolveSession(ctx, session, string(options.TaskID))
+	if err != nil {
+		return err
+	}
+	model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: taskID, Provider: resolved.Provider, Model: resolved.Model, Branch: session.Branch(ctx), Full: options.Full, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved), Prompter: prompter})
+	runErr := tui.Run(model, input, output)
+	printResumeHint(context.Background(), output, session, model.TaskID())
+	return runErr
 }
 
 func nativeLimits(resolved config.Resolved) erkaruntime.NativeLimits {

@@ -71,3 +71,17 @@ func TestNormalizeServerScopesRejectsUnknownAndEmpty(t *testing.T) {
 		t.Fatal("unknown scope accepted")
 	}
 }
+
+func TestValidateServerListenAllowsPlainHTTPOnTrustedVPNAddress(t *testing.T) {
+	t.Parallel()
+	options := serveOptions{listen: "100.101.102.103:7432", trustedCIDRs: []string{"100.64.0.0/10"}, poll: time.Second, claim: time.Second, heartbeat: time.Second}
+	if err := validateServerListen(options); err != nil {
+		t.Fatalf("VPN listen error = %v", err)
+	}
+	for _, listen := range []string{"0.0.0.0:7432", "192.168.1.10:7432"} {
+		options.listen = listen
+		if err := validateServerListen(options); err == nil {
+			t.Fatalf("listen %s outside the trusted network was accepted", listen)
+		}
+	}
+}

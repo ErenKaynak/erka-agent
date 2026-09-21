@@ -23,7 +23,70 @@ func newRemoteCommands(load func(context.Context) (config.Resolved, error), sele
 		newRemoteActionCommand("retry", "Retry a failed remote task", load, selected, func(ctx context.Context, remote *client.Client, id string) error { return remote.Retry(ctx, id) }),
 		newRemoteApprovalCommand("approve", "approved", load, selected),
 		newRemoteApprovalCommand("reject", "rejected", load, selected),
+		newRemoteAnswerCommand(load, selected),
+		newRemotePreviewCommand(load, selected),
+		newRemotePreviewsCommand(load, selected),
+		newRemoteActionCommand("preview-stop", "Stop a remote preview", load, selected, func(ctx context.Context, remote *client.Client, id string) error { return remote.StopPreview(ctx, id) }),
 	}
+}
+
+func newRemotePreviewCommand(load func(context.Context) (config.Resolved, error), selected func() string) *cobra.Command {
+	return &cobra.Command{Use: "preview <task-id> <preset>", Short: "Start a server preview preset for a task and print its VPN URL", Args: func(_ *cobra.Command, args []string) error {
+		if len(args) != 2 || strings.TrimSpace(args[0]) == "" || strings.TrimSpace(args[1]) == "" {
+			return fmt.Errorf("%w: preview requires a task ID and a preset name", ErrUsage)
+		}
+		return nil
+	}, RunE: func(command *cobra.Command, args []string) error {
+		remote, err := loadRemoteClient(command.Context(), load, selected())
+		if err != nil {
+			return err
+		}
+		preview, err := remote.StartPreview(command.Context(), args[0], args[1])
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(command.OutOrStdout(), "%s\t%s\t%s\n", preview.ID, preview.Status, preview.URL)
+		return err
+	}}
+}
+
+func newRemotePreviewsCommand(load func(context.Context) (config.Resolved, error), selected func() string) *cobra.Command {
+	return &cobra.Command{Use: "previews <task-id>", Short: "List a remote task's previews", Args: oneNonEmptyArg("previews requires one task ID"), RunE: func(command *cobra.Command, args []string) error {
+		remote, err := loadRemoteClient(command.Context(), load, selected())
+		if err != nil {
+			return err
+		}
+		previews, err := remote.Previews(command.Context(), args[0])
+		if err != nil {
+			return err
+		}
+		for _, preview := range previews {
+			if _, err := fmt.Fprintf(command.OutOrStdout(), "%s\t%s\t%s\t%s\n", preview.ID, preview.Preset, preview.Status, preview.URL); err != nil {
+				return err
+			}
+		}
+		return nil
+	}}
+}
+
+func newRemoteAnswerCommand(load func(context.Context) (config.Resolved, error), selected func() string) *cobra.Command {
+	return &cobra.Command{Use: "answer <approval-id> <answer...>", Short: "Answer a remote question and resume its task", Args: func(_ *cobra.Command, args []string) error {
+		if len(args) < 2 || strings.TrimSpace(args[0]) == "" || strings.TrimSpace(strings.Join(args[1:], " ")) == "" {
+			return fmt.Errorf("%w: answer requires an approval ID and answer text", ErrUsage)
+		}
+		return nil
+	}, RunE: func(command *cobra.Command, args []string) error {
+		remote, err := loadRemoteClient(command.Context(), load, selected())
+		if err != nil {
+			return err
+		}
+		approval, err := remote.RespondApproval(command.Context(), args[0], client.ApprovalResponse{Decision: "approved", Response: strings.Join(args[1:], " ")})
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(command.OutOrStdout(), "%s\t%s\n", approval.ID, approval.Status)
+		return err
+	}}
 }
 
 func newRemoteApprovalsCommand(load func(context.Context) (config.Resolved, error), selected func() string) *cobra.Command {
@@ -42,7 +105,11 @@ func newRemoteApprovalsCommand(load func(context.Context) (config.Resolved, erro
 			return err
 		}
 		for _, approval := range approvals {
-			if _, err := fmt.Fprintf(command.OutOrStdout(), "%s\t%s\t%s\t%s\t%s\n", approval.ID, approval.TaskID, approval.Kind, approval.Status, approval.Message); err != nil {
+			message := approval.Message
+			if len(approval.Options) > 0 {
+				message += " [options: " + strings.Join(approval.Options, " | ") + "]"
+			}
+			if _, err := fmt.Fprintf(command.OutOrStdout(), "%s\t%s\t%s\t%s\t%s\n", approval.ID, approval.TaskID, approval.Kind, approval.Status, message); err != nil {
 				return err
 			}
 		}
@@ -178,18 +245,29 @@ func newRemoteActionCommand(use, short string, load func(context.Context) (confi
 
 func newRemoteApprovalCommand(use, decision string, load func(context.Context) (config.Resolved, error), selected func() string) *cobra.Command {
 	short := strings.ToUpper(use[:1]) + use[1:] + " a remote approval"
-	return &cobra.Command{Use: use + " <approval-id>", Short: short, Args: oneNonEmptyArg(use + " requires one approval ID"), RunE: func(command *cobra.Command, args []string) error {
+	var note string
+	var always bool
+	command := &cobra.Command{Use: use + " <approval-id>", Short: short, Args: oneNonEmptyArg(use + " requires one approval ID"), RunE: func(command *cobra.Command, args []string) error {
 		remote, err := loadRemoteClient(command.Context(), load, selected())
 		if err != nil {
 			return err
 		}
-		approval, err := remote.DecideApproval(command.Context(), args[0], decision)
+		response := client.ApprovalResponse{Decision: decision, Response: note}
+		if always {
+			response.Scope = "task"
+		}
+		approval, err := remote.RespondApproval(command.Context(), args[0], response)
 		if err != nil {
 			return err
 		}
 		_, err = fmt.Fprintf(command.OutOrStdout(), "%s\t%s\n", approval.ID, approval.Status)
 		return err
 	}}
+	command.Flags().StringVar(&note, "note", "", "note passed to the model with the decision")
+	if decision == "approved" {
+		command.Flags().BoolVar(&always, "always", false, "approve this tool for the rest of the task")
+	}
+	return command
 }
 
 func loadRemoteClient(ctx context.Context, load func(context.Context) (config.Resolved, error), profile string) (*client.Client, error) {

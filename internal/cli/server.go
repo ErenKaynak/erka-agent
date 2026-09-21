@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,13 +28,14 @@ import (
 )
 
 type serveOptions struct {
-	listen    string
-	tlsCert   string
-	tlsKey    string
-	workerID  string
-	poll      time.Duration
-	claim     time.Duration
-	heartbeat time.Duration
+	listen       string
+	trustedCIDRs []string
+	tlsCert      string
+	tlsKey       string
+	workerID     string
+	poll         time.Duration
+	claim        time.Duration
+	heartbeat    time.Duration
 }
 
 var (
@@ -58,6 +60,7 @@ func newServeCommand(load func(context.Context) (config.Resolved, error)) *cobra
 	command.Flags().StringVar(&options.listen, "listen", "127.0.0.1:7432", "HTTP listen address")
 	command.Flags().StringVar(&options.tlsCert, "tls-cert", "", "TLS certificate file")
 	command.Flags().StringVar(&options.tlsKey, "tls-key", "", "TLS private-key file")
+	command.Flags().StringSliceVar(&options.trustedCIDRs, "trusted-cidr", nil, "accept clients only from this network and allow plain HTTP on an address inside it (repeatable; for example a VPN range)")
 	command.Flags().StringVar(&options.workerID, "worker-id", "", "durable worker identity")
 	command.Flags().DurationVar(&options.poll, "worker-poll", time.Second, "queued-task polling interval")
 	command.Flags().DurationVar(&options.claim, "claim-duration", 30*time.Second, "durable worker claim duration")
@@ -185,7 +188,16 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 	if isRootProcess() {
 		return errors.New("erka serve refuses to run as the root OS user")
 	}
+	options.trustedCIDRs = append(append([]string(nil), resolved.Server.TrustedCIDRs...), options.trustedCIDRs...)
 	if err := validateServerListen(options); err != nil {
+		return err
+	}
+	trusted, err := erkaserver.ParseTrustedNetworks(options.trustedCIDRs)
+	if err != nil {
+		return err
+	}
+	targets, err := erkaserver.NotificationTargets(resolved.Server, os.LookupEnv, nil)
+	if err != nil {
 		return err
 	}
 	database, err := store.OpenSQLite(ctx, filepath.Join(resolved.StateDir, "erka.db"))
@@ -194,7 +206,15 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 	}
 	defer database.Close()
 	manager := newAuthManager()
-	openSession := configuredServerSessionFactory(resolved, manager)
+	interactor, err := erkaserver.NewInteractor(database, nil, 0)
+	if err != nil {
+		return err
+	}
+	dispatcher, err := erkaserver.NewDispatcher(database, targets, nil)
+	if err != nil {
+		return err
+	}
+	openSession := configuredServerSessionFactory(resolved, manager, interactor)
 	service, err := erkaserver.NewService(erkaserver.ServiceOptions{
 		StateDir: resolved.StateDir, Store: database, RuntimeStore: database,
 		OpenSession: openSession, WorkerPoll: options.poll, ClaimDuration: options.claim,
@@ -202,9 +222,12 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 	if err != nil {
 		return err
 	}
+	previews := erkaserver.NewPreviewManager(resolved.Server.Previews, resolved.StateDir)
+	defer previews.StopAll()
 	api, err := erkaserver.NewAPI(erkaserver.APIOptions{
 		Service: service, Store: database, SSEHeartbeat: options.heartbeat,
 		Connections: serverConnections(resolved), Models: serverModels(resolved, manager), Pipelines: serverPipelines(resolved),
+		Previews: previews, Memories: database,
 	})
 	if err != nil {
 		return err
@@ -217,13 +240,21 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 		}
 	}
 	server := &http.Server{
-		Addr: options.listen, Handler: api.Handler(), ReadHeaderTimeout: 10 * time.Second,
+		Addr: options.listen, Handler: erkaserver.RestrictNetworks(api.Handler(), trusted), ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	defer cancelWorker()
 	workerResult := make(chan error, 1)
 	go func() { workerResult <- service.RunWorker(workerCtx, holder) }()
+	go func() {
+		if err := dispatcher.Run(workerCtx); err != nil && workerCtx.Err() == nil {
+			_, _ = fmt.Fprintf(output, "erka notifications stopped: %v\n", err)
+		}
+	}()
+	if len(targets) > 0 {
+		_, _ = fmt.Fprintf(output, "erka notifications enabled for %d target(s)\n", len(targets))
+	}
 	listenResult := make(chan error, 1)
 	go func() {
 		_, _ = fmt.Fprintf(output, "erka server listening on %s\n", options.listen)
@@ -269,18 +300,29 @@ func validateServerListen(options serveOptions) error {
 		return nil
 	}
 	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return errors.New("plain HTTP server must listen on a loopback address; configure TLS for remote access")
+	if ip != nil && ip.IsLoopback() {
+		return nil
 	}
-	return nil
+	if len(options.trustedCIDRs) > 0 {
+		networks, err := erkaserver.ParseTrustedNetworks(options.trustedCIDRs)
+		if err != nil {
+			return err
+		}
+		if ip != nil && !ip.IsUnspecified() && erkaserver.InTrustedNetwork(ip, networks) {
+			return nil
+		}
+		return errors.New("plain HTTP with trusted networks must listen on a specific address inside a trusted network, such as the server's VPN address")
+	}
+	return errors.New("plain HTTP server must listen on a loopback address; configure TLS or --trusted-cidr for remote access")
 }
 
-func configuredServerSessionFactory(resolved config.Resolved, manager *auth.Manager) erkaserver.SessionFactory {
+func configuredServerSessionFactory(resolved config.Resolved, manager *auth.Manager, interactor erkaruntime.Interactor) erkaserver.SessionFactory {
 	return func(ctx context.Context, root string) (erkaserver.TaskSession, error) {
 		options := app.SessionOptions{
 			WorkingDirectory: root, StateDir: resolved.StateDir, Pipeline: resolved,
 			ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(),
 			Limits: nativeLimits(resolved), AllowFullExecution: resolved.AllowFullExecution,
+			Interactor: interactor, ApproveCommands: resolved.ApproveCommands,
 		}
 		if resolved.ActivePipeline == "" {
 			key, _, err := manager.Resolve(ctx, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
