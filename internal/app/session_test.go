@@ -370,7 +370,7 @@ func TestSetModelRecordsSelectedModelInSingleProviderRun(t *testing.T) {
 	if err := session.SetModel(erkaruntime.ModelSelection{Stage: erkaruntime.StageCoding, Connection: "default", Model: "deepseek-v4-pro"}); err != nil {
 		t.Fatal(err)
 	}
-	run, err := session.newInitialRun(time.Now().UTC())
+	run, err := session.newInitialRun(time.Now().UTC(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func TestSetModelOverridesStagesBeforeRunCreationAndPreservesFallbacks(t *testin
 	if got := resolved.Pipelines["default"].Stages["planning"].Candidates[0]; got != "chatgpt/default" {
 		t.Fatalf("configured pipeline was mutated: %q", got)
 	}
-	run, err := session.newInitialRun(time.Now().UTC())
+	run, err := session.newInitialRun(time.Now().UTC(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

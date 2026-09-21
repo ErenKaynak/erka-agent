@@ -17,6 +17,8 @@ import (
 
 const nativeInstructions = `You are erka's coding stage. Work only inside the provided repository. Inspect relevant files, make the smallest correct change, run focused validation, inspect the final diff, and finish with a concise summary. Use tools for repository facts; never invent tool results.`
 
+const planModeInstructions = `You are erka in plan mode. The workspace is read-only: inspect relevant files and ask the user when a decision is genuinely theirs, but do not attempt to modify files or run commands. Finish with a concrete implementation plan: the approach, the files to change, risks, and how to verify the result.`
+
 type LocalOptions struct {
 	WorkingDirectory   string
 	StateDir           string

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ErenKaynak/erka-agent/internal/config"
+	"github.com/ErenKaynak/erka-agent/internal/memory"
 	"github.com/ErenKaynak/erka-agent/internal/routing"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 	"github.com/ErenKaynak/erka-agent/internal/sandbox"
@@ -35,6 +36,12 @@ type SessionOptions struct {
 	BridgeFactory      BridgeFactory
 	RebuildProvider    func(string) (erkaruntime.ModelProvider, error)
 	NativeModel        string
+	// Interactor lets native stages ask the user questions and request
+	// permissions. Without one, ask_user is not exposed.
+	Interactor erkaruntime.Interactor
+	// ApproveCommands exposes run_command without full execution, but every
+	// call requires the user's consent through Interactor.
+	ApproveCommands bool
 }
 
 type ProviderFactory func(context.Context, routing.Candidate) (erkaruntime.ModelProvider, error)
@@ -53,6 +60,8 @@ type Session struct {
 	cancel         context.CancelFunc
 	turnActive     bool
 	modelOverrides map[erkaruntime.Stage]string
+	memoryKey      string
+	planMode       bool
 }
 
 type Conversation struct {
@@ -110,8 +119,17 @@ func OpenSession(ctx context.Context, options SessionOptions) (*Session, error) 
 		_ = database.Close()
 		return nil, err
 	}
-	return &Session{options: options, root: root, project: project, database: database, sandbox: localSandbox, holder: holder, readOnly: !acquired}, nil
+	// A repository whose Git layout cannot be read still works, with global
+	// memory only.
+	memoryKey, _ := memory.ProjectKey(root)
+	return &Session{options: options, root: root, project: project, database: database, sandbox: localSandbox, holder: holder, readOnly: !acquired, memoryKey: memoryKey}, nil
 }
+
+// MemoryKey identifies this repository's project memory.
+func (session *Session) MemoryKey() string { return session.memoryKey }
+
+// Database exposes the session store for memory management commands.
+func (session *Session) Database() *store.SQLite { return session.database }
 
 func (session *Session) Root() string                     { return session.root }
 func (session *Session) ProjectID() erkaruntime.ProjectID { return session.project }
@@ -202,6 +220,9 @@ func (session *Session) Submit(ctx context.Context, taskID erkaruntime.TaskID, p
 		if task.Status == erkaruntime.TaskWaiting {
 			return "", errors.New("conversation has an unresolved tool outcome")
 		}
+		if task.Status == erkaruntime.TaskWaitingApproval {
+			return "", errors.New("conversation is waiting for your answer to a pending approval")
+		}
 	}
 	value, err := session.options.IDs.NewID("turn")
 	if err != nil {
@@ -235,7 +256,18 @@ func (session *Session) RunNext(ctx context.Context) (LocalResult, bool, error) 
 		}
 		return LocalResult{}, false, err
 	}
-	run, err := session.newInitialRun(now)
+	var triage *routing.Triage
+	if session.tiered() {
+		// The execution lease makes this session the only claimant, so the
+		// peeked turn is the one ClaimNextTurn claims below.
+		next, ok, err := session.database.PeekNextTurn(ctx, session.project, session.options.Pipeline.ActivePipeline)
+		if err != nil || !ok {
+			return LocalResult{}, ok, err
+		}
+		decision := session.triage(ctx, next.Prompt)
+		triage = &decision
+	}
+	run, err := session.newInitialRun(now, triage)
 	if err != nil {
 		return LocalResult{}, false, err
 	}
@@ -244,22 +276,91 @@ func (session *Session) RunNext(ctx context.Context) (LocalResult, bool, error) 
 		return LocalResult{}, ok, err
 	}
 	run.TaskID = turn.TaskID
-	return session.execute(ctx, turn, run, false)
+	return session.execute(ctx, turn, run, false, triage)
 }
 
-func (session *Session) newInitialRun(now time.Time) (erkaruntime.Run, error) {
+func (session *Session) tiered() bool {
+	pipeline, ok := session.options.Pipeline.Pipelines[session.options.Pipeline.ActivePipeline]
+	return ok && pipeline.Routing == config.RoutingTiered
+}
+
+// triage classifies a request with the configured triage model, or the free
+// local heuristic when none is configured.
+func (session *Session) triage(ctx context.Context, prompt string) routing.Triage {
+	reference := session.options.Pipeline.Pipelines[session.options.Pipeline.ActivePipeline].Triage.Candidate
+	if reference == "" || session.options.ProviderFactory == nil {
+		return routing.ClassifyHeuristic(prompt)
+	}
+	provider, err := session.options.ProviderFactory(ctx, routing.ResolveCandidate(session.options.Pipeline, reference))
+	if err != nil {
+		decision := routing.ClassifyHeuristic(prompt)
+		decision.Reason += fmt.Sprintf(" (triage model unavailable: %v)", err)
+		return decision
+	}
+	triageCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return routing.ClassifyWithModel(triageCtx, provider, prompt)
+}
+
+// pipelineFor applies a tier and then this process's model selections, so an
+// explicit /model choice still wins over a tier's default candidates.
+func (session *Session) pipelineFor(tier routing.Tier) (config.Resolved, error) {
+	base := session.options.Pipeline
+	if session.tiered() {
+		var err error
+		if base, err = routing.ApplyTier(base, tier); err != nil {
+			return config.Resolved{}, err
+		}
+	}
+	resolved := session.withModelOverrides(base)
+	if session.inPlanMode() {
+		resolved = planningOnly(resolved)
+	}
+	return resolved, nil
+}
+
+// planningOnly keeps just the active pipeline's planning stage.
+func planningOnly(resolved config.Resolved) config.Resolved {
+	pipeline, ok := resolved.Pipelines[resolved.ActivePipeline]
+	if !ok {
+		return resolved
+	}
+	route, ok := pipeline.Stages[string(routing.StagePlanning)]
+	if !ok {
+		return resolved
+	}
+	pipeline.Stages = map[string]config.StageRoute{string(routing.StagePlanning): route}
+	pipelines := make(map[string]config.Pipeline, len(resolved.Pipelines))
+	for name, value := range resolved.Pipelines {
+		pipelines[name] = value
+	}
+	pipelines[resolved.ActivePipeline] = pipeline
+	resolved.Pipelines = pipelines
+	return resolved
+}
+
+func (session *Session) newInitialRun(now time.Time, triage *routing.Triage) (erkaruntime.Run, error) {
 	value, err := session.options.IDs.NewID("run")
 	if err != nil {
 		return erkaruntime.Run{}, err
 	}
 	run := erkaruntime.Run{ID: erkaruntime.RunID(value), Stage: "coding", BackendClass: "native", Status: erkaruntime.RunQueued, CreatedAt: now, UpdatedAt: now, Attempt: 1}
 	if session.options.Pipeline.ActivePipeline != "" {
-		route, err := routing.ResolveFixed(session.effectivePipeline(), routing.StagePlanning, session.options.Limits)
+		tier := routing.TierStandard
+		if triage != nil {
+			tier = triage.Tier
+		}
+		resolved, err := session.pipelineFor(tier)
+		if err != nil {
+			return erkaruntime.Run{}, err
+		}
+		first := routing.FirstStage(resolved)
+		route, err := routing.ResolveFixed(resolved, first, session.options.Limits)
 		if err != nil {
 			return erkaruntime.Run{}, err
 		}
 		candidate := route.Candidates[0]
-		run.Stage, run.BackendClass, run.Connection, run.Provider, run.Model = string(routing.StagePlanning), candidate.BackendClass, candidate.Connection, candidate.Provider, candidate.Model
+		run.Stage, run.BackendClass, run.Connection, run.Provider, run.Model = string(first), candidate.BackendClass, candidate.Connection, candidate.Provider, candidate.Model
 		return run, nil
 	}
 	run.Provider = session.options.Provider.Name()
@@ -299,19 +400,45 @@ func (session *Session) Resume(ctx context.Context, taskID erkaruntime.TaskID) (
 		}
 	}
 	turn.Prompt = prompt
-	result, _, err := session.execute(ctx, turn, run, session.options.Pipeline.ActivePipeline != "")
+	result, _, err := session.execute(ctx, turn, run, session.options.Pipeline.ActivePipeline != "", nil)
 	return result, err
 }
 
-func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaruntime.Run, resumePipeline bool) (LocalResult, bool, error) {
-	if turn.ID != "" && turn.Status == store.TurnClaimed {
-		_ = session.database.UpdateTurnStatus(ctx, turn.ID, store.TurnClaimed, store.TurnRunning, session.options.Clock())
+func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaruntime.Run, resumePipeline bool, triage *routing.Triage) (LocalResult, bool, error) {
+	if turn.ID != "" && (turn.Status == store.TurnClaimed || turn.Status == store.TurnWaiting) {
+		_ = session.database.UpdateTurnStatus(ctx, turn.ID, turn.Status, store.TurnRunning, session.options.Clock())
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	session.mu.Lock()
 	session.cancel = cancel
 	allowFullExecution := session.options.AllowFullExecution
+	planMode := session.planMode
 	session.mu.Unlock()
+	interactor := session.options.Interactor
+	exposeCommands := !planMode && (allowFullExecution || (session.options.ApproveCommands && interactor != nil))
+	instructions := nativeInstructions
+	if planMode {
+		instructions = planModeInstructions
+	}
+	var approvalTools []string
+	if !allowFullExecution && exposeCommands {
+		approvalTools = []string{"run_command"}
+	}
+	recalled, recallErr := memory.Recall(ctx, session.database, session.memoryKey, turn.Prompt)
+	if recallErr != nil && session.options.Output != nil {
+		_, _ = fmt.Fprintf(session.options.Output, "memory recall unavailable: %v\n", recallErr)
+	}
+	memoryTools := memory.Tools(session.database, session.memoryKey, turn.TaskID, session.options.IDs, session.options.Clock)
+	if session.memoryKey == "" {
+		memoryTools = memoryTools[:1]
+	}
+	builtins := func() []erkaruntime.Tool {
+		available := append(tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: exposeCommands}), memoryTools...)
+		if planMode {
+			return readOnlyTools(available)
+		}
+		return available
+	}
 	leaseDone := make(chan struct{})
 	go session.maintainLease(runCtx, cancel, leaseDone)
 	defer func() { close(leaseDone); session.mu.Lock(); session.cancel = nil; session.mu.Unlock(); cancel() }()
@@ -319,34 +446,49 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 	activeRunID := run.ID
 	var err error
 	if session.options.Pipeline.ActivePipeline != "" {
-		engine := &routing.PipelineEngine{Config: session.effectivePipeline(), Store: session.database, IDs: session.options.IDs, Clock: session.options.Clock, Limits: session.options.Limits}
+		tier := routing.TierStandard
+		if triage != nil {
+			tier = triage.Tier
+		} else if session.tiered() {
+			if events, loadErr := session.database.LoadEvents(ctx, turn.TaskID, 0); loadErr == nil {
+				if recorded, ok := routing.RecordedTier(events); ok {
+					tier = recorded
+				}
+			}
+		}
+		resolved, tierErr := session.pipelineFor(tier)
+		if tierErr != nil {
+			// Running every configured stage is always safe.
+			resolved = session.effectivePipeline()
+		}
+		engine := &routing.PipelineEngine{Config: resolved, Store: session.database, IDs: session.options.IDs, Clock: session.options.Clock, Limits: session.options.Limits}
 		engine.Factory = func(factoryCtx context.Context, candidate routing.Candidate, stageName routing.Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
 			if candidate.BackendClass == config.ConnectionSubscriptionBridge {
 				bridge, openErr := session.options.BridgeFactory(factoryCtx, candidate)
 				if openErr != nil {
 					return nil, openErr
 				}
-				return &erkaruntime.BridgeBackend{Bridge: bridge, WorkingDirectory: session.root, Model: candidate.Model, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
+				return &erkaruntime.BridgeBackend{Bridge: bridge, WorkingDirectory: session.root, Model: candidate.Model, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock, Memory: recalled}, nil
 			}
 			provider, openErr := session.options.ProviderFactory(factoryCtx, candidate)
 			if openErr != nil {
 				return nil, openErr
 			}
-			availableTools := stageTools(tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), stageName)
-			return &erkaruntime.NativeBackend{Provider: provider, Tools: availableTools, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
+			availableTools := stageTools(builtins(), stageName)
+			return &erkaruntime.NativeBackend{Provider: provider, Tools: availableTools, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: instructions, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock, Interactor: interactor, ApprovalTools: approvalTools, Memory: recalled}, nil
 		}
-		pipelineResult, pipelineErr := engine.Run(runCtx, routing.PipelineRequest{TaskID: turn.TaskID, Objective: turn.Prompt, InitialRun: run, Resume: resumePipeline})
+		pipelineResult, pipelineErr := engine.Run(runCtx, routing.PipelineRequest{TaskID: turn.TaskID, Objective: turn.Prompt, InitialRun: run, Resume: resumePipeline, Triage: triage})
 		activeRunID, err = pipelineResult.RunID, pipelineErr
 		stage = erkaruntime.StageResult{Checkpoint: pipelineResult.Checkpoint, Status: pipelineResult.Status}
 	} else {
-		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
+		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: builtins(), Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: instructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock, Interactor: interactor, ApprovalTools: approvalTools, Memory: recalled}
 		stage, err = backend.RunStage(runCtx, erkaruntime.StageRequest{TaskID: turn.TaskID, RunID: run.ID, Objective: turn.Prompt}, session.database)
 	}
 	if activeRunID == "" {
 		activeRunID = run.ID
 	}
 	status := store.TurnCompleted
-	if errors.Is(err, erkaruntime.ErrUnknownMutatingToolOutcome) {
+	if errors.Is(err, erkaruntime.ErrUnknownMutatingToolOutcome) || errors.Is(err, erkaruntime.ErrAwaitingUser) {
 		status = store.TurnWaiting
 	} else if errors.Is(err, context.Canceled) {
 		status = store.TurnCancelled
@@ -404,6 +546,10 @@ func stageTools(all []erkaruntime.Tool, stage routing.Stage) []erkaruntime.Tool 
 	if stage == routing.StageCoding || stage == routing.StageRepair {
 		return all
 	}
+	return readOnlyTools(all)
+}
+
+func readOnlyTools(all []erkaruntime.Tool) []erkaruntime.Tool {
 	result := make([]erkaruntime.Tool, 0, len(all))
 	for _, tool := range all {
 		if !tool.Definition().Mutating {
@@ -425,6 +571,20 @@ func (session *Session) SetFullExecution(enabled bool) {
 	session.mu.Lock()
 	session.options.AllowFullExecution = enabled
 	session.mu.Unlock()
+}
+
+// SetPlanMode makes later turns read-only: models may inspect and ask, but
+// get no mutating tools, and pipelines run only their planning stage.
+func (session *Session) SetPlanMode(enabled bool) {
+	session.mu.Lock()
+	session.planMode = enabled
+	session.mu.Unlock()
+}
+
+func (session *Session) inPlanMode() bool {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.planMode
 }
 
 // SetModel changes one stage's primary connection/model route for subsequent
@@ -518,9 +678,12 @@ func (session *Session) endTurn() {
 }
 
 func (session *Session) effectivePipeline() config.Resolved {
+	return session.withModelOverrides(session.options.Pipeline)
+}
+
+func (session *Session) withModelOverrides(resolved config.Resolved) config.Resolved {
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	resolved := session.options.Pipeline
 	if resolved.ActivePipeline == "" || len(session.modelOverrides) == 0 {
 		return resolved
 	}
