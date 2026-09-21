@@ -79,6 +79,10 @@ type Approval struct {
 	RequestedAt time.Time  `json:"requestedAt"`
 	ExpiresAt   *time.Time `json:"expiresAt"`
 	DecidedAt   *time.Time `json:"decidedAt"`
+	Tool        string     `json:"tool"`
+	Options     []string   `json:"options"`
+	Response    string     `json:"response"`
+	Scope       string     `json:"scope"`
 }
 
 func New(baseURL, token string, transport *http.Client) (*Client, error) {
@@ -87,8 +91,8 @@ func New(baseURL, token string, transport *http.Client) (*Client, error) {
 		return nil, fmt.Errorf("invalid remote server URL %q", baseURL)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopbackHost(parsed.Hostname())) {
-		return nil, errors.New("remote server URL must use HTTPS unless it targets loopback")
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && (loopbackHost(parsed.Hostname()) || privateNetworkHost(parsed.Hostname()))) {
+		return nil, errors.New("remote server URL must use HTTPS unless it targets loopback or a private VPN address")
 	}
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("remote server token is empty")
@@ -145,8 +149,20 @@ func (client *Client) Retry(ctx context.Context, taskID string) error {
 }
 
 func (client *Client) DecideApproval(ctx context.Context, approvalID, decision string) (Approval, error) {
+	return client.RespondApproval(ctx, approvalID, ApprovalResponse{Decision: decision})
+}
+
+type ApprovalResponse struct {
+	Decision string `json:"decision"`
+	Response string `json:"response,omitempty"`
+	Scope    string `json:"scope,omitempty"`
+}
+
+// RespondApproval decides an approval with an optional answer or note. Scope
+// "task" approves a permission for the rest of the task.
+func (client *Client) RespondApproval(ctx context.Context, approvalID string, response ApprovalResponse) (Approval, error) {
 	var approval Approval
-	err := client.doJSON(ctx, http.MethodPost, "/v1/approvals/"+url.PathEscape(approvalID)+"/decision", map[string]string{"decision": decision}, &approval)
+	err := client.doJSON(ctx, http.MethodPost, "/v1/approvals/"+url.PathEscape(approvalID)+"/decision", response, &approval)
 	return approval, err
 }
 
@@ -302,6 +318,17 @@ func decodeAPIError(response *http.Response) error {
 	return &APIError{Status: response.StatusCode, Code: envelope.Error.Code, Message: envelope.Error.Message}
 }
 
+// cgnatRange is the shared address space Tailscale assigns node addresses from.
+var cgnatRange = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// privateNetworkHost accepts private and VPN IP literals, whose traffic is
+// encrypted by the VPN tunnel rather than TLS. Hostnames are not accepted
+// because their resolution may change.
+func privateNetworkHost(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsPrivate() || cgnatRange.Contains(ip))
+}
+
 func loopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -311,3 +338,33 @@ func loopbackHost(host string) bool {
 }
 
 func AfterSequence(sequence uint64) string { return strconv.FormatUint(sequence, 10) }
+
+type Preview struct {
+	ID       string   `json:"id"`
+	TaskID   string   `json:"taskId"`
+	Preset   string   `json:"preset"`
+	Port     int      `json:"port"`
+	URL      string   `json:"url"`
+	Command  []string `json:"command"`
+	Status   string   `json:"status"`
+	ExitNote string   `json:"exitNote"`
+}
+
+// StartPreview starts a server-configured preview preset for a task.
+func (client *Client) StartPreview(ctx context.Context, taskID, preset string) (Preview, error) {
+	var preview Preview
+	err := client.doJSON(ctx, http.MethodPost, "/v1/tasks/"+url.PathEscape(taskID)+"/previews", map[string]string{"preset": preset}, &preview)
+	return preview, err
+}
+
+func (client *Client) Previews(ctx context.Context, taskID string) ([]Preview, error) {
+	var response struct {
+		Previews []Preview `json:"previews"`
+	}
+	err := client.doJSON(ctx, http.MethodGet, "/v1/tasks/"+url.PathEscape(taskID)+"/previews", nil, &response)
+	return response.Previews, err
+}
+
+func (client *Client) StopPreview(ctx context.Context, previewID string) error {
+	return client.doJSON(ctx, http.MethodDelete, "/v1/previews/"+url.PathEscape(previewID), nil, nil)
+}
