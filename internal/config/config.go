@@ -66,9 +66,11 @@ type Resolved struct {
 	MaxOutputTokens    int64
 	StageTimeout       time.Duration
 	AllowFullExecution bool
+	ApproveCommands    bool
 	ActivePipeline     string
 	Connections        map[string]Connection
 	Pipelines          map[string]Pipeline
+	Server             Server
 }
 
 // Connection names either a native provider endpoint or an explicitly labeled
@@ -95,7 +97,31 @@ type Pipeline struct {
 	Routing           string                `yaml:"routing"`
 	MaxRepairAttempts int                   `yaml:"max_repair_attempts,omitempty"`
 	Stages            map[string]StageRoute `yaml:"stages"`
+	// Triage and Tiers configure routing: tiered, which classifies each turn
+	// as trivial, standard, or complex and runs only that tier's stages.
+	Triage Triage          `yaml:"triage,omitempty"`
+	Tiers  map[string]Tier `yaml:"tiers,omitempty"`
 }
+
+// Triage optionally names a cheap native model that classifies each request.
+// Without one, erka classifies requests with a local heuristic at no cost.
+type Triage struct {
+	Candidate string `yaml:"candidate,omitempty"`
+}
+
+// Tier selects the stages a complexity tier runs and optionally overrides a
+// stage's candidates, for example a cheaper coder for trivial requests.
+type Tier struct {
+	Stages     []string            `yaml:"stages,omitempty"`
+	Candidates map[string][]string `yaml:"candidates,omitempty"`
+}
+
+const (
+	RoutingFixed  = "fixed"
+	RoutingTiered = "tiered"
+)
+
+var PipelineTiers = []string{"trivial", "standard", "complex"}
 
 type StageRoute struct {
 	Candidates           []string `yaml:"candidates"`
@@ -153,7 +179,9 @@ type fileConfig struct {
 	} `yaml:"runtime,omitempty"`
 	Permissions struct {
 		AllowFullExecution bool `yaml:"allow_full_execution,omitempty"`
+		ApproveCommands    bool `yaml:"approve_commands,omitempty"`
 	} `yaml:"permissions,omitempty"`
+	Server Server `yaml:"server,omitempty"`
 }
 
 // Load resolves defaults, a user configuration file, environment variables,
@@ -236,6 +264,8 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 			}
 		}
 		resolved.AllowFullExecution = loaded.Permissions.AllowFullExecution
+		resolved.ApproveCommands = loaded.Permissions.ApproveCommands
+		resolved.Server = loaded.Server
 		resolved.ActivePipeline = loaded.Pipeline
 		resolved.Connections = loaded.Connections
 		resolved.Pipelines = loaded.Pipelines
@@ -341,6 +371,9 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 	if err := validateRouting(&resolved); err != nil {
 		return Resolved{}, err
 	}
+	if err := validateServer(&resolved.Server); err != nil {
+		return Resolved{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return Resolved{}, err
 	}
@@ -435,9 +468,13 @@ func validateRouting(resolved *Resolved) error {
 		return fmt.Errorf("pipeline %q is not configured", resolved.ActivePipeline)
 	}
 	for name, pipeline := range resolved.Pipelines {
-		if pipeline.Routing != "fixed" {
+		if pipeline.Routing != RoutingFixed && pipeline.Routing != RoutingTiered {
 			return fmt.Errorf("pipeline %q uses unsupported routing mode %q", name, pipeline.Routing)
 		}
+		if err := validateTiers(resolved, name, &pipeline); err != nil {
+			return err
+		}
+		resolved.Pipelines[name] = pipeline
 		if pipeline.MaxRepairAttempts < 0 {
 			return fmt.Errorf("pipeline %q has a negative repair-attempt limit", name)
 		}
