@@ -30,6 +30,12 @@ configuration and API between minor releases.
 - Accepting a server task commits its worktree to `erka/<task>` and removes
   the worktree; rejecting keeps the changes at `refs/erka/rejected/<task>`.
   Finalization is crash-safe, never runs repository hooks, and closes the task.
+- OS sandbox for model commands and previews (`sandbox-exec` on macOS,
+  bubblewrap on Linux): writes limited to the workspace, loopback-only network
+  by default, credential stores and erka state hidden, and Git hooks and
+  config read-only. Configure with `sandbox.mode`, `sandbox.network`, and
+  `sandbox.writable_paths`; god mode bypasses it.
+- erka's file tools refuse to write repository metadata under `.git`.
 
 ### Changed
 - Interactive sessions offer `run_command` with per-call consent instead of

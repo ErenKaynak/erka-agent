@@ -51,7 +51,10 @@ func (*fakeController) UnknownOutcome(context.Context, erkaruntime.TaskID) (erka
 func (*fakeController) ResolveUnknown(context.Context, erkaruntime.TaskID, bool) error { return nil }
 func (controller *fakeController) Cancel()                                             { controller.cancelled++ }
 func (controller *fakeController) SetFullExecution(value bool)                         { controller.full = value }
-func (controller *fakeController) SetPlanMode(value bool)                              { controller.plan = value }
+func (*fakeController) SandboxStatus() string {
+	return "macOS sandbox, writes limited to the workspace, no network"
+}
+func (controller *fakeController) SetPlanMode(value bool) { controller.plan = value }
 func (controller *fakeController) SetModel(value erkaruntime.ModelSelection) error {
 	controller.model = value
 	return nil

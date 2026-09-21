@@ -34,9 +34,10 @@ no work exists only in a working tree.
 
 A product that can run commands must be trustworthy before it is featureful.
 
-- **OS sandbox** behind the existing sandbox interface: `sandbox-exec` on
-  macOS, bubblewrap or Landlock on Linux; writes limited to the workspace,
-  network off unless allowed. God mode is the only unsandboxed mode.
+- **OS sandbox** (done, ADR 0008): `sandbox-exec` on macOS, bubblewrap on
+  Linux; writes limited to the workspace, loopback-only network unless
+  allowed, credentials hidden, Git hooks and config read-only. God mode is the
+  only unsandboxed mode. A Windows backend remains open.
 - **Accept → branch workflow** (done): accepting a server task commits its
   worktree to `erka/<task>` and removes the worktree; rejecting keeps the
   changes at a hidden ref. Pushing and PR creation arrive with the Phase 2

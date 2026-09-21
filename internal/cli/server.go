@@ -215,7 +215,9 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 		return err
 	}
 	openSession := configuredServerSessionFactory(resolved, manager, interactor)
-	previews := erkaserver.NewPreviewManager(resolved.Server.Previews, resolved.StateDir)
+	previewIsolation := commandIsolation(resolved)
+	previewIsolation.Network = true
+	previews := erkaserver.NewPreviewManager(resolved.Server.Previews, resolved.StateDir, previewIsolation)
 	defer previews.StopAll()
 	service, err := erkaserver.NewService(erkaserver.ServiceOptions{
 		StateDir: resolved.StateDir, Store: database, RuntimeStore: database,
@@ -325,6 +327,7 @@ func configuredServerSessionFactory(resolved config.Resolved, manager *auth.Mana
 			ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(),
 			Limits: nativeLimits(resolved), AllowFullExecution: resolved.AllowFullExecution,
 			Interactor: interactor, ApproveCommands: resolved.ApproveCommands,
+			Isolation: commandIsolation(resolved),
 		}
 		if resolved.ActivePipeline == "" {
 			key, _, err := manager.Resolve(ctx, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)

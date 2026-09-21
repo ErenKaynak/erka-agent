@@ -31,6 +31,11 @@ type Options struct {
 	// AllowFullExecution enables arbitrary child processes. A working directory
 	// is not OS isolation, so callers must require explicit user consent.
 	AllowFullExecution bool
+	// Unconfined runs commands outside the OS sandbox (god mode).
+	Unconfined bool
+	// Sandboxed tells the model that commands are confined, so it can
+	// explain failures instead of retrying blocked operations.
+	Sandboxed bool
 }
 
 // Builtins returns the M1 tool set. The returned order is stable so model
@@ -41,7 +46,7 @@ func Builtins(sandbox erkaruntime.Sandbox, options Options) []erkaruntime.Tool {
 		&applyPatchTool{sandbox},
 	}
 	if options.AllowFullExecution {
-		result = append(result, &runCommandTool{sandbox})
+		result = append(result, &runCommandTool{sandbox: sandbox, unconfined: options.Unconfined, sandboxed: options.Sandboxed && !options.Unconfined})
 	}
 	return append(result, &gitStatusTool{sandbox}, &gitDiffTool{sandbox})
 }
@@ -203,10 +208,18 @@ func (tool *applyPatchTool) Execute(ctx context.Context, invocation erkaruntime.
 	return commandOutput(result), nil
 }
 
-type runCommandTool struct{ sandbox erkaruntime.Sandbox }
+type runCommandTool struct {
+	sandbox    erkaruntime.Sandbox
+	unconfined bool
+	sandboxed  bool
+}
 
 func (tool *runCommandTool) Definition() erkaruntime.ToolDefinition {
-	return definition("run_command", "Run one executable directly in the workspace without a shell.",
+	description := "Run one executable directly in the workspace without a shell."
+	if tool.sandboxed {
+		description += " Commands run in an OS sandbox: they can write only inside the workspace and cannot reach the network. If a command fails for that reason, tell the user instead of working around it."
+	}
+	return definition("run_command", description,
 		`{"type":"object","additionalProperties":false,"required":["command"],"properties":{"command":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"string"}},"directory":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":600}}}`,
 		true, false, defaultCommandLimit)
 }
@@ -235,7 +248,7 @@ func (tool *runCommandTool) Execute(ctx context.Context, invocation erkaruntime.
 	}
 	result, err := tool.sandbox.Run(ctx, erkaruntime.CommandRequest{
 		Executable: arguments.Command[0], Arguments: arguments.Command[1:], Directory: arguments.Directory,
-		Timeout: timeout, OutputLimitBytes: defaultCommandLimit,
+		Timeout: timeout, OutputLimitBytes: defaultCommandLimit, Unconfined: tool.unconfined,
 	})
 	if err != nil {
 		return resultFromError(err)

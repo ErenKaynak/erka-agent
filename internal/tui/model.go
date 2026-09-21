@@ -36,6 +36,7 @@ type Controller interface {
 	SetFullExecution(bool)
 	SetPlanMode(bool)
 	SetModel(erkaruntime.ModelSelection) error
+	SandboxStatus() string
 }
 
 type Options struct {
@@ -990,7 +991,11 @@ func (model *Model) render() string {
 			task = "new conversation"
 		}
 		permission := model.mode.label()
-		return overlay(model.width, model.height, "Session status", fmt.Sprintf("Task: %s\nState: %s\nProvider: %s/%s\nPermission: %s\nRead-only: %t\nUsage: %s\n\nEsc close", Sanitize(task), Sanitize(model.status), Sanitize(model.provider), Sanitize(model.model), permission, model.controller.ReadOnly(), model.usageText()))
+		sandboxStatus := model.controller.SandboxStatus()
+		if model.mode == modeGod {
+			sandboxStatus = "bypassed in god mode"
+		}
+		return overlay(model.width, model.height, "Session status", fmt.Sprintf("Task: %s\nState: %s\nProvider: %s/%s\nPermission: %s\nSandbox: %s\nRead-only: %t\nUsage: %s\n\nEsc close", Sanitize(task), Sanitize(model.status), Sanitize(model.provider), Sanitize(model.model), permission, Sanitize(sandboxStatus), model.controller.ReadOnly(), model.usageText()))
 	case "providers":
 		return overlay(model.width, model.height, "Providers and authentication", providersContents(model.providerList))
 	case "models":
@@ -1023,6 +1028,9 @@ func (model *Model) renderHeader() string {
 		header += theme.muted.Render(" (" + Sanitize(model.branch) + ")")
 	}
 	header += theme.muted.Render(" · "+Sanitize(model.provider)+"/"+Sanitize(model.model)+" · ") + theme.modeBadge(model.mode)
+	if model.mode != modeGod && model.controller != nil && strings.HasPrefix(model.controller.SandboxStatus(), "unavailable") {
+		header += "  " + theme.warn.Render("no sandbox")
+	}
 	if model.controller != nil && model.controller.ReadOnly() {
 		header += "  " + theme.warn.Render("READ-ONLY")
 	}
@@ -1152,6 +1160,13 @@ func (model *Model) renderPromptCard() string {
 	if request.Kind == erkaruntime.UserPermission {
 		rows = append(rows, theme.warn.Bold(true).Render("! Permission requested"))
 		rows = append(rows, lipgloss.NewStyle().Width(width).Render(Sanitize(request.Message)))
+		if model.controller != nil {
+			if status := model.controller.SandboxStatus(); strings.HasPrefix(status, "unavailable") || status == "off" {
+				rows = append(rows, theme.warn.Render("runs without a sandbox, with your full access"))
+			} else {
+				rows = append(rows, theme.faint.Render("runs in the "+Sanitize(status)))
+			}
+		}
 		rows = append(rows, theme.muted.Render("y allow · a allow for this session · n deny"))
 	} else {
 		rows = append(rows, theme.warn.Bold(true).Render("? erka has a question"))

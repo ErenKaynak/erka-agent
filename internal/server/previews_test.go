@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ErenKaynak/erka-agent/internal/config"
+	"github.com/ErenKaynak/erka-agent/internal/sandbox"
 )
 
 // TestPreviewHelperProcess is a tiny dev server started as a preview preset.
@@ -30,7 +31,7 @@ func TestPreviewManagerRunsPresetOnBindAddressAndStops(t *testing.T) {
 	manager := NewPreviewManager(config.Previews{
 		BindAddress: "127.0.0.1", PortMin: 42100, PortMax: 42199,
 		Commands: map[string][]string{"dev": {os.Args[0], "-test.run=TestPreviewHelperProcess", "--", "--preview-helper", "{host}", "{port}"}},
-	}, t.TempDir())
+	}, t.TempDir(), sandbox.Isolation{Mode: sandbox.IsolationAuto, Network: true})
 	t.Cleanup(manager.StopAll)
 	if _, err := manager.Start("task-1", t.TempDir(), "unknown"); err == nil {
 		t.Fatal("unknown preset was started")
@@ -76,7 +77,7 @@ func TestPreviewManagerRunsPresetOnBindAddressAndStops(t *testing.T) {
 
 func TestPreviewsDisabledWithoutPresets(t *testing.T) {
 	t.Parallel()
-	if _, err := NewPreviewManager(config.Previews{}, t.TempDir()).Start("task-1", t.TempDir(), "dev"); err != ErrPreviewsDisabled {
+	if _, err := NewPreviewManager(config.Previews{}, t.TempDir(), sandbox.Isolation{}).Start("task-1", t.TempDir(), "dev"); err != ErrPreviewsDisabled {
 		t.Fatalf("Start() error = %v, want disabled", err)
 	}
 }

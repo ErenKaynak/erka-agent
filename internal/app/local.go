@@ -13,6 +13,7 @@ import (
 
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
+	"github.com/ErenKaynak/erka-agent/internal/sandbox"
 )
 
 const nativeInstructions = `You are erka's coding stage. Work only inside the provided repository. Inspect relevant files, make the smallest correct change, run focused validation, inspect the final diff, and finish with a concise summary. Use tools for repository facts; never invent tool results.`
@@ -31,6 +32,7 @@ type LocalOptions struct {
 	Clock              func() time.Time
 	Limits             erkaruntime.NativeLimits
 	AllowFullExecution bool
+	Isolation          sandbox.Isolation
 	Pipeline           config.Resolved
 	ProviderFactory    ProviderFactory
 	BridgeFactory      BridgeFactory
@@ -50,7 +52,7 @@ func RunLocal(ctx context.Context, options LocalOptions) (LocalResult, error) {
 	if options.Provider == nil && options.Pipeline.ActivePipeline == "" {
 		return LocalResult{}, errors.New("local run requires a model provider")
 	}
-	session, err := OpenSession(ctx, SessionOptions{WorkingDirectory: options.WorkingDirectory, StateDir: options.StateDir, Provider: options.Provider, NativeModel: options.NativeModel, Output: options.Output, IDs: options.IDs, Clock: options.Clock, Limits: options.Limits, AllowFullExecution: options.AllowFullExecution, Pipeline: options.Pipeline, ProviderFactory: options.ProviderFactory, BridgeFactory: options.BridgeFactory})
+	session, err := OpenSession(ctx, SessionOptions{WorkingDirectory: options.WorkingDirectory, StateDir: options.StateDir, Provider: options.Provider, NativeModel: options.NativeModel, Output: options.Output, IDs: options.IDs, Clock: options.Clock, Limits: options.Limits, AllowFullExecution: options.AllowFullExecution, Isolation: options.Isolation, Pipeline: options.Pipeline, ProviderFactory: options.ProviderFactory, BridgeFactory: options.BridgeFactory})
 	if err != nil {
 		return LocalResult{}, err
 	}

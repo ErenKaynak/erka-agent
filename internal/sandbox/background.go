@@ -18,6 +18,8 @@ type BackgroundRequest struct {
 	Directory   string
 	Environment map[string]string
 	Output      io.Writer
+	// Unconfined skips OS isolation.
+	Unconfined bool
 }
 
 // BackgroundProcess is a running process group that Stop terminates.
@@ -40,17 +42,20 @@ func (local *Local) StartBackground(request BackgroundRequest) (*BackgroundProce
 	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("background directory %q is not a directory", request.Directory)
 	}
-	command := exec.Command(request.Executable, request.Arguments...)
-	command.Dir = directory
-	command.Env = mergeEnvironment(local.environment, request.Environment)
+	command, cleanup, err := local.newCommand(request.Executable, request.Arguments, directory, request.Unconfined, request.Environment)
+	if err != nil {
+		return nil, err
+	}
 	command.Stdout, command.Stderr = request.Output, request.Output
 	configureProcess(command)
 	if err := command.Start(); err != nil {
+		cleanup()
 		return nil, fmt.Errorf("start %q: %w", request.Executable, err)
 	}
 	process := &BackgroundProcess{command: command, done: make(chan struct{})}
 	go func() {
 		waitErr := command.Wait()
+		cleanup()
 		process.mu.Lock()
 		process.err = waitErr
 		process.mu.Unlock()

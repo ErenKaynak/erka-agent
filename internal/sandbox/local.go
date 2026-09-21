@@ -26,11 +26,17 @@ var (
 	ErrFileTooLarge    = errors.New("file exceeds read limit")
 	ErrDirectoryLimit  = errors.New("directory entry limit exceeded")
 	ErrCommandTimedOut = errors.New("command timed out")
+	// ErrProtectedPath rejects writes to repository metadata, where a planted
+	// hook or config entry would later run outside the sandbox.
+	ErrProtectedPath = errors.New("path is protected repository metadata")
 )
 
 type Options struct {
 	// Environment is filtered through a small allowlist. Nil uses os.Environ.
 	Environment []string
+	// Isolation confines commands with the OS sandbox. The zero value is off,
+	// which trusted internal callers such as Git maintenance rely on.
+	Isolation Isolation
 }
 
 // Local scopes direct filesystem operations and process working directories to
@@ -39,6 +45,9 @@ type Options struct {
 type Local struct {
 	root        string
 	environment []string
+	isolation   Isolation
+	backend     string
+	unavailable string
 }
 
 func NewLocal(root string, options Options) (*Local, error) {
@@ -64,7 +73,11 @@ func NewLocal(root string, options Options) (*Local, error) {
 	if environment == nil {
 		environment = os.Environ()
 	}
-	return &Local{root: filepath.Clean(canonical), environment: filterEnvironment(environment)}, nil
+	local := &Local{root: filepath.Clean(canonical), environment: filterEnvironment(environment), isolation: options.Isolation}
+	if local.isolation.enabled() {
+		local.backend, local.unavailable = detectBackend()
+	}
+	return local, nil
 }
 
 func (local *Local) ReadFile(ctx context.Context, name string, limit int64) ([]byte, error) {
@@ -215,9 +228,11 @@ func (local *Local) Run(ctx context.Context, request erkaruntime.CommandRequest)
 		return result, fmt.Errorf("command directory %q is not a directory", request.Directory)
 	}
 
-	command := exec.Command(request.Executable, request.Arguments...)
-	command.Dir = directory
-	command.Env = mergeEnvironment(local.environment, request.Environment)
+	command, cleanup, err := local.newCommand(request.Executable, request.Arguments, directory, request.Unconfined, request.Environment)
+	if err != nil {
+		return result, err
+	}
+	defer cleanup()
 	command.Stdin = bytes.NewReader(request.StandardInput)
 	budget := &outputBudget{remaining: request.OutputLimitBytes}
 	stdout := &boundedBuffer{budget: budget}
@@ -297,7 +312,15 @@ func (local *Local) resolveWritable(name string) (string, error) {
 	if !within(local.root, parent) {
 		return "", fmt.Errorf("resolve %q: %w", name, ErrPathEscape)
 	}
-	return filepath.Join(parent, filepath.Base(candidate)), nil
+	resolved := filepath.Join(parent, filepath.Base(candidate))
+	if relative, err := filepath.Rel(local.root, resolved); err == nil {
+		for _, part := range strings.Split(filepath.ToSlash(relative), "/") {
+			if strings.EqualFold(part, ".git") {
+				return "", fmt.Errorf("write %q: %w", name, ErrProtectedPath)
+			}
+		}
+	}
+	return resolved, nil
 }
 
 func (local *Local) join(name string) (string, error) {

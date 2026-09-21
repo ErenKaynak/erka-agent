@@ -36,6 +36,10 @@ String matching on shell commands is not enforcement. If push is denied, the
 sandbox must not possess push credentials and should not have an authorized
 publication path.
 
+The implemented boundary is described in ADR 0008: commands run under
+`sandbox-exec` on macOS or bubblewrap on Linux with workspace-only writes,
+hidden credential stores, and read-only Git hooks and configuration.
+
 ## Network policy
 
 Network is denied or restricted according to the selected mode and project

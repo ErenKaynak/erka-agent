@@ -64,6 +64,24 @@ composer or press an option number; `Esc` lets it decide. Commands are offered
 with per-call consent: `y` allows once, `a` allows that tool for the session,
 and `n` denies. Full access (`Ctrl+P` or `--full`) skips these prompts.
 
+Commands the model runs are confined by an OS sandbox (`sandbox-exec` on macOS,
+bubblewrap on Linux): they can write only inside the repository, a private
+temporary directory, and build caches; they cannot reach the network except
+loopback; credential folders such as `~/.ssh` and `~/.aws` are unreadable; and
+`.git/config` and `.git/hooks` are read-only so nothing can plant code that
+runs later outside the sandbox. God mode is the only unsandboxed mode.
+
+```yaml
+sandbox:
+  mode: auto          # auto | required | off
+  network: false      # allow sandboxed commands to reach the network
+  writable_paths: []  # extra writable directories, for example ~/.gradle
+```
+
+`/status` shows the active policy. On platforms without a sandbox backend,
+`auto` runs commands unconfined and the header says `no sandbox`; `required`
+refuses to run them instead.
+
 Use `//text` to send a model prompt that begins with a literal `/`. Help, diff,
 permission, recovery, cancellation, and exit dialogs are bounded to the current
 terminal viewport; `Esc` closes a dialog without acting.

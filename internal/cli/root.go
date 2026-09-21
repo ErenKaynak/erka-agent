@@ -273,7 +273,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 				return fmt.Errorf("get working directory: %w", err)
 			}
 		}
-		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved)})
+		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Isolation: commandIsolation(resolved), Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved)})
 		return err
 	}
 	providerName, baseURL := resolved.Provider, resolved.BaseURL
@@ -304,6 +304,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 		WorkingDirectory: workingDirectory, StateDir: resolved.StateDir,
 		Objective: objective, ResumeTaskID: resume, Provider: provider, NativeModel: resolved.Model, Output: output,
 		AllowFullExecution: resolved.AllowFullExecution,
+		Isolation:          commandIsolation(resolved),
 		Limits:             nativeLimits(resolved),
 	})
 	return err
@@ -331,7 +332,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 			}
 		})
 		prompter := tui.NewPrompter()
-		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, Interactor: prompter, ApproveCommands: true})
+		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, Interactor: prompter, ApproveCommands: true, Isolation: commandIsolation(resolved)})
 		if err != nil {
 			return err
 		}
@@ -383,7 +384,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 	// An interactive session has a person present, so commands are offered
 	// with per-call consent instead of being hidden until full access.
 	prompter := tui.NewPrompter()
-	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider, Interactor: prompter, ApproveCommands: true})
+	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider, Interactor: prompter, ApproveCommands: true, Isolation: commandIsolation(resolved)})
 	if err != nil {
 		return err
 	}

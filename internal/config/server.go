@@ -216,3 +216,42 @@ func containsString(values []string, want string) bool {
 	}
 	return false
 }
+
+const (
+	SandboxAuto     = "auto"
+	SandboxRequired = "required"
+	SandboxOff      = "off"
+)
+
+// Sandbox configures OS isolation for commands the model runs. Only god mode
+// (full execution) runs commands unconfined.
+type Sandbox struct {
+	// Mode is auto (sandbox when the platform supports it), required (refuse
+	// to run commands without a sandbox), or off.
+	Mode string `yaml:"mode,omitempty"`
+	// Network allows sandboxed commands to reach hosts other than loopback.
+	Network bool `yaml:"network,omitempty"`
+	// WritablePaths are extra directories commands may write, such as a
+	// toolchain cache. A leading ~/ means the home directory.
+	WritablePaths []string `yaml:"writable_paths,omitempty"`
+}
+
+func validateSandbox(sandbox *Sandbox, home string) error {
+	sandbox.Mode = strings.ToLower(strings.TrimSpace(sandbox.Mode))
+	if sandbox.Mode == "" {
+		sandbox.Mode = SandboxAuto
+	}
+	if sandbox.Mode != SandboxAuto && sandbox.Mode != SandboxRequired && sandbox.Mode != SandboxOff {
+		return fmt.Errorf("sandbox.mode must be auto, required, or off")
+	}
+	for index, path := range sandbox.WritablePaths {
+		if rest, ok := strings.CutPrefix(path, "~/"); ok && home != "" {
+			path = strings.TrimRight(home, "/") + "/" + rest
+		}
+		if !strings.HasPrefix(path, "/") && !(len(path) > 2 && path[1] == ':') {
+			return fmt.Errorf("sandbox.writable_paths[%d] must be absolute", index)
+		}
+		sandbox.WritablePaths[index] = path
+	}
+	return nil
+}

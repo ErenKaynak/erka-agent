@@ -49,16 +49,19 @@ type previewProcess struct {
 // PreviewManager runs configured preview presets. Processes live only as long
 // as the server process; they are stopped on shutdown.
 type PreviewManager struct {
-	mu       sync.Mutex
-	config   config.Previews
-	logDir   string
-	ids      erkaruntime.IDGenerator
-	clock    func() time.Time
-	previews map[string]*previewProcess
+	mu        sync.Mutex
+	config    config.Previews
+	logDir    string
+	isolation sandbox.Isolation
+	ids       erkaruntime.IDGenerator
+	clock     func() time.Time
+	previews  map[string]*previewProcess
 }
 
-func NewPreviewManager(previews config.Previews, stateDir string) *PreviewManager {
-	return &PreviewManager{config: previews, logDir: filepath.Join(stateDir, "previews"), ids: erkaruntime.RandomIDGenerator{}, clock: func() time.Time { return time.Now().UTC() }, previews: make(map[string]*previewProcess)}
+// NewPreviewManager runs presets inside the given sandbox policy, which
+// should allow the network so dev servers can fetch and serve.
+func NewPreviewManager(previews config.Previews, stateDir string, isolation sandbox.Isolation) *PreviewManager {
+	return &PreviewManager{config: previews, logDir: filepath.Join(stateDir, "previews"), isolation: isolation, ids: erkaruntime.RandomIDGenerator{}, clock: func() time.Time { return time.Now().UTC() }, previews: make(map[string]*previewProcess)}
 }
 
 func (manager *PreviewManager) Presets() []string {
@@ -100,7 +103,7 @@ func (manager *PreviewManager) Start(taskID erkaruntime.TaskID, worktree, preset
 		value = strings.ReplaceAll(value, "{port}", strconv.Itoa(port))
 		arguments[index] = strings.ReplaceAll(value, "{host}", host)
 	}
-	workspace, err := sandbox.NewLocal(worktree, sandbox.Options{})
+	workspace, err := sandbox.NewLocal(worktree, sandbox.Options{Isolation: manager.isolation})
 	if err != nil {
 		return Preview{}, err
 	}

@@ -209,6 +209,9 @@ type CommandRequest struct {
 	StandardInput    []byte
 	Timeout          time.Duration
 	OutputLimitBytes int64
+	// Unconfined skips OS isolation. Only god mode and erka's own fixed
+	// read-only Git inspection commands set it.
+	Unconfined bool
 }
 
 type CommandResult struct {

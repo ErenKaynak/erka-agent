@@ -42,6 +42,9 @@ type SessionOptions struct {
 	// ApproveCommands exposes run_command without full execution, but every
 	// call requires the user's consent through Interactor.
 	ApproveCommands bool
+	// Isolation is the OS sandbox policy for commands. Full execution
+	// (god mode) runs commands outside it.
+	Isolation sandbox.Isolation
 }
 
 type ProviderFactory func(context.Context, routing.Candidate) (erkaruntime.ModelProvider, error)
@@ -89,7 +92,7 @@ func OpenSession(ctx context.Context, options SessionOptions) (*Session, error) 
 	if err != nil {
 		return nil, err
 	}
-	localSandbox, err := sandbox.NewLocal(root, sandbox.Options{})
+	localSandbox, err := sandbox.NewLocal(root, sandbox.Options{Isolation: options.Isolation})
 	if err != nil {
 		return nil, fmt.Errorf("initialize workspace sandbox: %w", err)
 	}
@@ -124,6 +127,9 @@ func OpenSession(ctx context.Context, options SessionOptions) (*Session, error) 
 	memoryKey, _ := memory.ProjectKey(root)
 	return &Session{options: options, root: root, project: project, database: database, sandbox: localSandbox, holder: holder, readOnly: !acquired, memoryKey: memoryKey}, nil
 }
+
+// SandboxStatus describes how commands run in this session.
+func (session *Session) SandboxStatus() string { return session.sandbox.IsolationStatus() }
 
 // MemoryKey identifies this repository's project memory.
 func (session *Session) MemoryKey() string { return session.memoryKey }
@@ -433,7 +439,8 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 		memoryTools = memoryTools[:1]
 	}
 	builtins := func() []erkaruntime.Tool {
-		available := append(tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: exposeCommands}), memoryTools...)
+		sandboxed := !strings.HasPrefix(session.sandbox.IsolationStatus(), "off") && !strings.HasPrefix(session.sandbox.IsolationStatus(), "unavailable")
+		available := append(tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: exposeCommands, Unconfined: allowFullExecution, Sandboxed: sandboxed}), memoryTools...)
 		if planMode {
 			return readOnlyTools(available)
 		}

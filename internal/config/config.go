@@ -71,6 +71,7 @@ type Resolved struct {
 	Connections        map[string]Connection
 	Pipelines          map[string]Pipeline
 	Server             Server
+	Sandbox            Sandbox
 }
 
 // Connection names either a native provider endpoint or an explicitly labeled
@@ -181,7 +182,8 @@ type fileConfig struct {
 		AllowFullExecution bool `yaml:"allow_full_execution,omitempty"`
 		ApproveCommands    bool `yaml:"approve_commands,omitempty"`
 	} `yaml:"permissions,omitempty"`
-	Server Server `yaml:"server,omitempty"`
+	Server  Server  `yaml:"server,omitempty"`
+	Sandbox Sandbox `yaml:"sandbox,omitempty"`
 }
 
 // Load resolves defaults, a user configuration file, environment variables,
@@ -266,6 +268,7 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 		resolved.AllowFullExecution = loaded.Permissions.AllowFullExecution
 		resolved.ApproveCommands = loaded.Permissions.ApproveCommands
 		resolved.Server = loaded.Server
+		resolved.Sandbox = loaded.Sandbox
 		resolved.ActivePipeline = loaded.Pipeline
 		resolved.Connections = loaded.Connections
 		resolved.Pipelines = loaded.Pipelines
@@ -372,6 +375,9 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 		return Resolved{}, err
 	}
 	if err := validateServer(&resolved.Server); err != nil {
+		return Resolved{}, err
+	}
+	if err := validateSandbox(&resolved.Sandbox, options.HomeDir); err != nil {
 		return Resolved{}, err
 	}
 	if err := ctx.Err(); err != nil {
