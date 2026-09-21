@@ -28,10 +28,13 @@ The initial keyboard map is:
 - `Alt+Enter` or `Shift+Enter`: insert a newline.
 - `Ctrl+O`: open the conversation picker.
 - `Ctrl+N`: start a new conversation.
-- `Ctrl+D`: inspect the working-tree diff.
+- `Ctrl+D`: open the colored, scrollable working-tree diff.
+- `Ctrl+T`: show or hide tool output under each tool step.
+- `PgUp`/`PgDn`: scroll the transcript; `Ctrl+G` jumps back to the latest output.
+- `Shift+Tab`: cycle auto → plan (read-only, purple) → god mode (full access, red).
 - `Ctrl+P`: confirm workspace/full execution for this process.
 - `Esc`: close an overlay or confirm cancellation of an active turn.
-- `Ctrl+C`: confirm exit; queued prompts remain durable.
+- `Ctrl+C`: clear the input; press it again within two seconds to quit. Queued prompts remain durable.
 - `?`: show keyboard help.
 
 Typing `/` in the composer shows matching local commands; press `Tab` to
@@ -44,13 +47,22 @@ the model:
 - `/open <task-id>`: open a conversation by its durable ID.
 - `/diff`: inspect the current working-tree diff.
 - `/permissions`: open the session permission confirmation.
+- `/plan`: switch to read-only plan mode.
+- `/auto`: return to auto mode.
 - `/full`: request full command execution with confirmation.
 - `/workspace`: immediately return to workspace-only execution.
 - `/cancel`: confirm cancellation of the active turn.
 - `/status`: show the current task, provider, state, and permission mode.
 - `/provider`: show native connection and subscription bridge status.
-- `/model`: discover models and open the searchable per-stage model picker.
-- `/quit`: confirm exit.
+- `/model`: discover models and open the per-stage model picker, grouped by stage with the current model marked.
+- `/quit`: exit immediately.
+
+The TUI shows each tool call as one line with its target and outcome, a live
+status line with the current step, elapsed time, and token usage, and a
+filterable conversation picker. When erka asks a question, answer in the
+composer or press an option number; `Esc` lets it decide. Commands are offered
+with per-call consent: `y` allows once, `a` allows that tool for the session,
+and `n` denies. Full access (`Ctrl+P` or `--full`) skips these prompts.
 
 Use `//text` to send a model prompt that begins with a literal `/`. Help, diff,
 permission, recovery, cancellation, and exit dialogs are bounded to the current
@@ -68,8 +80,9 @@ Run the first task in a disposable repository and review its working-tree diff.
 Without `--full`, `erka` exposes the scoped read, search, patch, and Git
 inspection tools but does not expose arbitrary command execution.
 
-Use `--cwd <path>` to select another repository and `--task <id>` to open a
-specific conversation in the TUI. Each scripted run prints its durable task ID
+Use `--cwd <path>` to select another repository and `-s <session>` (or
+`--task <id>`) to reopen a conversation; a unique prefix of the ID is enough.
+When you quit, erka prints the exact `erka -s …` command for the session you left. Each scripted run prints its durable task ID
 before contacting the model. If the process
 is interrupted, restart it from the same repository with:
 
@@ -267,6 +280,102 @@ JSON stream through a deny-by-default plan profile with project configuration
 disabled. Subscription bridges are rejected for coding, validation, and repair
 stages.
 
+### Complexity-tiered routing
+
+`routing: tiered` classifies each request as `trivial`, `standard`, or
+`complex` and runs only that tier's stages, so a typo fix does not pay for
+planning, validation, and review. By default trivial runs coding only,
+standard adds validation and repair, and complex runs every configured stage.
+A tier may also swap in cheaper candidates for a stage:
+
+```yaml
+pipelines:
+  smart:
+    routing: tiered
+    triage:
+      candidate: coder/deepseek-v4-flash   # optional; omit to use the free local heuristic
+    tiers:
+      trivial:
+        candidates:
+          coding: [coder/deepseek-v4-flash]
+    stages:
+      planning: {candidates: [chatgpt/default]}
+      coding: {candidates: [coder/deepseek-v4-pro]}
+      validation: {candidates: [coder/deepseek-v4-flash]}
+      repair: {candidates: [coder/deepseek-v4-pro]}
+      review: {candidates: [chatgpt/default]}
+```
+
+The decision is recorded as a durable `task.triaged` event, so a resumed task
+keeps the stages it started with. A model selected with `/model` still takes
+precedence over a tier's candidates.
+
+### Long-term memory
+
+Memory is stored in erka's own database and recalled into every stage's
+context, so every connected model and subscription bridge sees the same notes.
+Global memories apply everywhere; project memories apply to one repository and
+are shared by its server task worktrees.
+
+```bash
+erka memory add --global "Prefer table-driven Go tests"
+erka memory add --kind decision "All SQLite access goes through internal/store"
+erka memory list
+erka memory search "how are tests written"
+erka memory rm <memory-id>
+```
+
+Models get `memory_search` in every stage and `memory_save` for project notes.
+Model-saved notes are labeled unverified; only you can add global memory.
+
+## Remote operation over a VPN
+
+`erka serve` runs tasks in isolated worktrees and can be driven from a laptop
+CLI profile or a phone. On a WireGuard or Tailscale network, listen on the
+server's VPN address and restrict clients to the VPN range; the tunnel encrypts
+traffic and bearer tokens remain required:
+
+```yaml
+permissions:
+  approve_commands: true        # expose run_command, but ask before each call
+server:
+  public_url: http://100.101.102.103:7432
+  trusted_cidrs: [100.64.0.0/10]
+  notifications:
+    - type: ntfy
+      url: https://ntfy.your-vpn/erka
+      token_env: NTFY_TOKEN
+      action_token_env: ERKA_APPROVE_TOKEN   # optional approve/deny buttons
+  previews:
+    bind_address: 100.101.102.103
+    commands:
+      dev: [npm, run, dev, --, --hostname, "{host}", --port, "{port}"]
+```
+
+```bash
+erka serve --listen 100.101.102.103:7432
+erka server token create phone --scope read,write,approve
+```
+
+Open `http://<vpn-address>:7432/app/` on the phone, paste the token, and add
+it to the home screen. The app shows pending questions and permission requests,
+live task activity, diffs, previews, and memory.
+
+- **Questions and permissions.** Native stages can call `ask_user`, and with
+  `approve_commands` each `run_command` asks first. The task parks durably
+  without holding a worker, then resumes when you answer from the app, a
+  notification button, or `erka remote answer <approval-id> <text>`,
+  `erka remote approve <id> [--always]`, or `erka remote reject <id> --note`.
+- **Notifications.** Questions, permission requests, completions, and failures
+  go to ntfy or a signed generic webhook through a durable outbox. Delivery
+  is retried with backoff and never affects task state. The ntfy action token
+  is sent to the ntfy server, so configure it only for a self-hosted instance.
+- **Previews.** `erka preview <task-id> dev` (or the app's Previews tab)
+  starts a configured preset in the task worktree on the VPN address and prints
+  its URL. Only presets from the server's YAML can run. For projects on your
+  own machine, bind the dev server to all interfaces, for example
+  `next dev -H 0.0.0.0`, and open `http://<laptop-vpn-address>:3000`.
+
 ## Product promise
 
 - Run without a server on macOS, Linux, or Windows.
@@ -298,8 +407,8 @@ Development proceeds through demonstrable milestones:
 7. Extensibility and public-release packaging.
 
 Broad integrations are deferred until the local native vertical slice is
-reliable. The project does not currently include a web UI, MCP integration,
-multi-user SaaS, distributed workers, or automatic deployment.
+reliable. The project does not currently include MCP integration, multi-user
+SaaS, distributed workers, or automatic deployment.
 
 ## Current status
 
@@ -320,8 +429,12 @@ planning/review stages, canonical checkpoint translation, capability and login
 reporting, and deterministic fallback. Codex device authentication is delegated
 to the official CLI; erka never handles the resulting ChatGPT credentials.
 
-The server/API is planned for M4, and browser access is planned for M5. No web
-UI or background daemon is included today.
+The optional `erka serve` daemon provides the authenticated `/v1` API, durable
+worker, resumable SSE, isolated task worktrees, remote CLI profiles, mid-run
+questions and permission requests, ntfy and webhook notifications, VPN-only
+serving, task previews, and a mobile web client at `/app/`. Tiered routing and
+cross-model long-term memory work in both local and server mode. The local
+TUI answers questions and command permissions inline.
 
 ## Security posture
 

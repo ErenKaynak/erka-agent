@@ -1,6 +1,4 @@
-# Local project guidance and scope documents
-/AGENTS.md
-/docs/
+# Personal working notes
 /deepseek-changes.md
 
 # Local erka state (project configuration may remain trackable)
@@ -11,6 +9,7 @@
 
 # Build and test artifacts
 /erka
+/erka.exe
 /dist/
 /coverage/
 *.coverprofile
