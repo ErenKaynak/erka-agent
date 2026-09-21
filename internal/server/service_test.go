@@ -119,10 +119,10 @@ func TestServiceRenewsClaimWhileTaskIsRunning(t *testing.T) {
 		return app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: root, StateDir: state, Provider: provider, NativeModel: "fixture"})
 	}
 	service, err := NewService(ServiceOptions{
-		StateDir:      state,
-		Store:         database,
-		RuntimeStore:  database,
-		OpenSession:   openSession,
+		StateDir:     state,
+		Store:        database,
+		RuntimeStore: database,
+		OpenSession:  openSession,
 		// Long enough that one slow write under the race detector cannot
 		// let the claim lapse, short enough to prove renewal below.
 		ClaimDuration: 2 * time.Second,
