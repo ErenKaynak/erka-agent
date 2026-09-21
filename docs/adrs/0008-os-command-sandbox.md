@@ -25,6 +25,12 @@ under `.git` for the same reason.
 
 ## Consequences
 
+Network isolation differs by platform. macOS blocks outbound connections
+except to the host's own addresses, so a local database stays reachable.
+Linux runs the command in a fresh network namespace: its own loopback works,
+but host services, including the host's loopback, are unreachable unless
+`sandbox.network` is set.
+
 The sandbox is a least-privilege boundary for a single user's own machine,
 not a multi-tenant or hostile-kernel boundary. Tools that ignore `TMPDIR` and
 write to `/tmp` directly fail under bubblewrap. Build caches remain writable

@@ -76,6 +76,8 @@ func (local *Local) IsolationStatus() string {
 	network := "no network"
 	if local.isolation.Network {
 		network = "network allowed"
+	} else if local.backend == "bubblewrap" {
+		network = "no network (isolated, host services unreachable)"
 	}
 	return local.backend + ", writes limited to the workspace, " + network
 }

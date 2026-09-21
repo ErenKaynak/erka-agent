@@ -66,8 +66,8 @@ and `n` denies. Full access (`Ctrl+P` or `--full`) skips these prompts.
 
 Commands the model runs are confined by an OS sandbox (`sandbox-exec` on macOS,
 bubblewrap on Linux): they can write only inside the repository, a private
-temporary directory, and build caches; they cannot reach the network except
-loopback; credential folders such as `~/.ssh` and `~/.aws` are unreadable; and
+temporary directory, and build caches; they cannot reach the network (macOS still allows the machine's own services;
+Linux isolates the network entirely); credential folders such as `~/.ssh` and `~/.aws` are unreadable; and
 `.git/config` and `.git/hooks` are read-only so nothing can plant code that
 runs later outside the sandbox. God mode is the only unsandboxed mode.
 

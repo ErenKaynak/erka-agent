@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,18 @@ func TestIsolationHelperProcess(t *testing.T) {
 		connection, err = net.DialTimeout("tcp", target, 2*time.Second)
 		if err == nil {
 			_ = connection.Close()
+		}
+	case "selfloop":
+		var listener net.Listener
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err == nil {
+			go acceptAll(listener)
+			var connection net.Conn
+			connection, err = net.DialTimeout("tcp", listener.Addr().String(), 2*time.Second)
+			if err == nil {
+				_ = connection.Close()
+			}
+			_ = listener.Close()
 		}
 	case "tempfile":
 		var file *os.File
@@ -141,8 +154,17 @@ func TestSandboxBlocksNetworkButAllowsLoopback(t *testing.T) {
 	defer loopback.Close()
 	go acceptAll(loopback)
 	fixture := newIsolationFixture(t, false)
-	if result := fixture.run(t, false, "dial", loopback.Addr().String()); result.ExitCode != 0 {
-		t.Fatalf("loopback connection was blocked: %s", result.StandardOutput)
+	if result := fixture.run(t, false, "selfloop", "-"); result.ExitCode != 0 {
+		t.Fatalf("a sandboxed command could not use its own loopback: %s", result.StandardOutput)
+	}
+	// macOS keeps host loopback reachable; Linux isolates the network
+	// namespace entirely, so host services are unreachable too.
+	hostLoopback := fixture.run(t, false, "dial", loopback.Addr().String())
+	if runtime.GOOS == "darwin" && hostLoopback.ExitCode != 0 {
+		t.Fatalf("host loopback was blocked on macOS: %s", hostLoopback.StandardOutput)
+	}
+	if runtime.GOOS == "linux" && hostLoopback.ExitCode == 0 {
+		t.Fatal("isolated Linux sandbox reached a host loopback service")
 	}
 	// 192.0.2.1 is TEST-NET-1: never routable, so an unconfined dial times
 	// out while the sandbox must refuse it immediately.
