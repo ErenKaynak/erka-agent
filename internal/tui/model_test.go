@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ErenKaynak/erka-agent/internal/app"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
@@ -18,6 +19,7 @@ type fakeController struct {
 	opened        []erkaruntime.TaskID
 	conversations []erkaruntime.TaskSnapshot
 	full          bool
+	plan          bool
 	cancelled     int
 	model         erkaruntime.ModelSelection
 }
@@ -49,6 +51,7 @@ func (*fakeController) UnknownOutcome(context.Context, erkaruntime.TaskID) (erka
 func (*fakeController) ResolveUnknown(context.Context, erkaruntime.TaskID, bool) error { return nil }
 func (controller *fakeController) Cancel()                                             { controller.cancelled++ }
 func (controller *fakeController) SetFullExecution(value bool)                         { controller.full = value }
+func (controller *fakeController) SetPlanMode(value bool)                              { controller.plan = value }
 func (controller *fakeController) SetModel(value erkaruntime.ModelSelection) error {
 	controller.model = value
 	return nil
@@ -82,8 +85,14 @@ func TestModelResponsiveLayoutAndHelp(t *testing.T) {
 		t.Fatal("help overlay not rendered")
 	}
 	model.Update(tea.WindowSizeMsg{Width: 130, Height: 34})
-	if model.transcript.Width() >= 130 {
-		t.Fatal("wide layout did not reserve side panel")
+	if model.transcript.Width() != 130 {
+		t.Fatalf("single-column transcript width = %d, want the full terminal", model.transcript.Width())
+	}
+	model.Update(key("?"))
+	for _, row := range strings.Split(model.View().Content, "\n") {
+		if width := ansi.StringWidth(row); width > 130 {
+			t.Fatalf("row is %d columns wide on a 130-column terminal: %q", width, row)
+		}
 	}
 }
 
@@ -430,6 +439,10 @@ func key(value string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}
 	case "tab":
 		return tea.KeyPressMsg{Code: tea.KeyTab}
+	case "shift+tab":
+		return tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
+	case "backspace":
+		return tea.KeyPressMsg{Code: tea.KeyBackspace}
 	case "esc":
 		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	case "up":
@@ -439,6 +452,9 @@ func key(value string) tea.KeyPressMsg {
 	case "y":
 		return tea.KeyPressMsg{Code: 'y', Text: "y"}
 	default:
+		if letter, ok := strings.CutPrefix(value, "ctrl+"); ok && len(letter) == 1 {
+			return tea.KeyPressMsg{Code: rune(letter[0]), Mod: tea.ModCtrl}
+		}
 		runes := []rune(value)
 		if len(runes) == 1 {
 			return tea.KeyPressMsg{Code: runes[0], Text: value}
