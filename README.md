@@ -366,6 +366,11 @@ live task activity, diffs, previews, and memory.
   without holding a worker, then resumes when you answer from the app, a
   notification button, or `erka remote answer <approval-id> <text>`,
   `erka remote approve <id> [--always]`, or `erka remote reject <id> --note`.
+- **Reviewing results.** A finished task waits for review. Accepting commits
+  its worktree to the branch `erka/<task>` in the server's repository and
+  removes the worktree; rejecting removes it but keeps the changes at
+  `refs/erka/rejected/<task>`. Repository hooks never run during this step,
+  and `erka remote show <task>` prints the branch.
 - **Notifications.** Questions, permission requests, completions, and failures
   go to ntfy or a signed generic webhook through a durable outbox. Delivery
   is retried with backoff and never affects task state. The ntfy action token

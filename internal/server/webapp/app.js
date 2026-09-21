@@ -216,7 +216,11 @@ function taskScreen(taskID) {
       retry.addEventListener("click", async () => { try { await api("POST", "/v1/tasks/" + encodeURIComponent(taskID) + "/retry"); toast("Queued again."); } catch (error) { toast(error.message); } });
       controls.append(retry);
     }
-    header.replaceChildren(h("div", { class: "row spread" }, badge(task.status), h("span", { class: "muted" }, task.runtimeStatus || "")), h("h1", { class: "objective" }, task.objective || taskID), controls);
+    header.replaceChildren(h("div", { class: "row spread" }, badge(task.outcome || task.status), h("span", { class: "muted" }, task.runtimeStatus || "")), h("h1", { class: "objective" }, task.objective || taskID), controls);
+    if (task.outcome) {
+      header.append(outcomeCard(task));
+      return;
+    }
     if (task.status === "completed" || task.status === "failed") {
       const prompt = h("textarea", { placeholder: "Follow-up request", rows: 3 });
       const send = h("button", { class: "primary" }, "Send follow-up");
@@ -249,7 +253,7 @@ function taskScreen(taskID) {
         api("GET", "/v1/approvals?status=pending&taskId=" + encodeURIComponent(taskID)),
         api("GET", "/v1/tasks/" + encodeURIComponent(taskID) + "/items?after=" + lastSequence),
       ]);
-      const changed = !task || loaded.status !== task.status || loaded.runtimeStatus !== task.runtimeStatus;
+      const changed = !task || loaded.status !== task.status || loaded.runtimeStatus !== task.runtimeStatus || loaded.outcome !== task.outcome;
       task = loaded;
       if (changed) renderHeader();
       pending.replaceChildren(...approvals.approvals.map((approval) => approvalCard(approval, refresh, false)));
@@ -264,6 +268,22 @@ function taskScreen(taskID) {
   };
   renderBody();
   every(2500, refresh);
+}
+
+function outcomeCard(task) {
+  if (task.resultBranch) {
+    return h("div", { class: "card" },
+      h("strong", {}, "Accepted"),
+      h("p", { class: "message" }, "The changes are committed on branch " + task.resultBranch + ". On the server's repository:"),
+      h("pre", {}, "git switch " + task.resultBranch));
+  }
+  if (task.outcome === "rejected" && task.resultRef) {
+    return h("div", { class: "card" },
+      h("strong", {}, "Rejected"),
+      h("p", { class: "message" }, "The worktree was removed. Its changes are still recoverable:"),
+      h("pre", {}, "git branch recovered " + task.resultRef));
+  }
+  return h("div", { class: "card" }, h("strong", {}, task.outcome === "accepted" ? "Accepted" : "Rejected"), h("p", { class: "muted" }, "The task made no changes."));
 }
 
 function activity(items) {

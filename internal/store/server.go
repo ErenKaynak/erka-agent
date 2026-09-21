@@ -43,7 +43,23 @@ type ServerTask struct {
 	ClaimExpiresAt  time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	// Outcome records the accepted or rejected review of a completed task.
+	// Once FinalizedAt is set the worktree is gone and the task is closed.
+	Outcome      TaskOutcome
+	ResultRef    string
+	ResultBase   string
+	ResultCommit string
+	FinalizedAt  time.Time
 }
+
+type TaskOutcome string
+
+const (
+	TaskAccepted TaskOutcome = "accepted"
+	TaskRejected TaskOutcome = "rejected"
+)
+
+const serverTaskColumns = `task_id, server_project_id, worktree_root, status, claim_holder, claim_expires_at, created_at, updated_at, outcome, result_ref, result_base, result_commit, finalized_at`
 
 type ApprovalStatus string
 
@@ -159,11 +175,11 @@ func (store *SQLite) CreateServerTask(ctx context.Context, task ServerTask) erro
 }
 
 func (store *SQLite) LoadServerTask(ctx context.Context, taskID erkaruntime.TaskID) (ServerTask, error) {
-	return scanServerTask(store.db.QueryRowContext(ctx, `SELECT task_id, server_project_id, worktree_root, status, claim_holder, claim_expires_at, created_at, updated_at FROM server_tasks WHERE task_id = ?`, taskID), taskID)
+	return scanServerTask(store.db.QueryRowContext(ctx, `SELECT `+serverTaskColumns+` FROM server_tasks WHERE task_id = ?`, taskID), taskID)
 }
 
 func (store *SQLite) ListServerTasks(ctx context.Context, projectID string) ([]ServerTask, error) {
-	query := `SELECT task_id, server_project_id, worktree_root, status, claim_holder, claim_expires_at, created_at, updated_at FROM server_tasks`
+	query := `SELECT ` + serverTaskColumns + ` FROM server_tasks`
 	args := []any(nil)
 	if projectID != "" {
 		query += ` WHERE server_project_id = ?`
@@ -195,7 +211,7 @@ func (store *SQLite) ClaimServerTask(ctx context.Context, holder string, now tim
 		return ServerTask{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	row := tx.QueryRowContext(ctx, `SELECT task_id, server_project_id, worktree_root, status, claim_holder, claim_expires_at, created_at, updated_at FROM server_tasks WHERE status = 'queued' OR (status = 'running' AND claim_expires_at <= ?) ORDER BY created_at, task_id LIMIT 1`, formatTime(now))
+	row := tx.QueryRowContext(ctx, `SELECT `+serverTaskColumns+` FROM server_tasks WHERE status = 'queued' OR (status = 'running' AND claim_expires_at <= ?) ORDER BY created_at, task_id LIMIT 1`, formatTime(now))
 	task, err := scanServerTask(row, "")
 	if errors.Is(err, sql.ErrNoRows) || errors.Is(err, erkaruntime.ErrNotFound) {
 		return ServerTask{}, false, nil
@@ -300,7 +316,7 @@ func (store *SQLite) ReleaseServerTaskClaim(ctx context.Context, taskID erkarunt
 }
 
 func (store *SQLite) QueueServerTask(ctx context.Context, taskID erkaruntime.TaskID, now time.Time) error {
-	result, err := store.db.ExecContext(ctx, `UPDATE server_tasks SET status = 'queued', claim_holder = NULL, claim_expires_at = NULL, updated_at = ? WHERE task_id = ? AND status IN ('waiting', 'completed', 'failed')`, formatTime(now), taskID)
+	result, err := store.db.ExecContext(ctx, `UPDATE server_tasks SET status = 'queued', claim_holder = NULL, claim_expires_at = NULL, updated_at = ? WHERE task_id = ? AND status IN ('waiting', 'completed', 'failed') AND finalized_at IS NULL`, formatTime(now), taskID)
 	if err != nil {
 		return err
 	}
@@ -558,10 +574,16 @@ func scanServerProject(row rowScanner, id string) (ServerProject, error) {
 }
 
 func scanServerTask(row rowScanner, id erkaruntime.TaskID) (ServerTask, error) {
+	return scanServerTaskWith(row, id)
+}
+
+// scanServerTaskWith scans serverTaskColumns followed by extra destinations.
+func scanServerTaskWith(row rowScanner, id erkaruntime.TaskID, extra ...any) (ServerTask, error) {
 	var task ServerTask
 	var status, created, updated string
-	var holder, expiry sql.NullString
-	if err := row.Scan(&task.TaskID, &task.ServerProjectID, &task.WorktreeRoot, &status, &holder, &expiry, &created, &updated); err != nil {
+	var holder, expiry, outcome, ref, base, commit, finalized sql.NullString
+	destinations := append([]any{&task.TaskID, &task.ServerProjectID, &task.WorktreeRoot, &status, &holder, &expiry, &created, &updated, &outcome, &ref, &base, &commit, &finalized}, extra...)
+	if err := row.Scan(destinations...); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ServerTask{}, fmt.Errorf("server task %q: %w", id, erkaruntime.ErrNotFound)
 		}
@@ -580,6 +602,10 @@ func scanServerTask(row rowScanner, id erkaruntime.TaskID) (ServerTask, error) {
 	}
 	if err == nil {
 		task.UpdatedAt, err = parseTime(updated)
+	}
+	task.Outcome, task.ResultRef, task.ResultBase, task.ResultCommit = TaskOutcome(outcome.String), ref.String, base.String, commit.String
+	if err == nil && finalized.Valid {
+		task.FinalizedAt, err = parseTime(finalized.String)
 	}
 	return task, err
 }

@@ -40,6 +40,14 @@ type ControlStore interface {
 	DecideApproval(context.Context, string, string, store.ApprovalStatus, time.Time) error
 	RecordApprovalDecision(context.Context, store.ApprovalDecision) error
 	ExpireApprovals(context.Context, time.Time) (int64, error)
+	PendingFinalizations(context.Context, int) ([]store.Finalization, error)
+	FinalizeServerTask(context.Context, erkaruntime.TaskID, store.TaskOutcome, string, string, string, time.Time) error
+	SupersedeReviews(context.Context, erkaruntime.TaskID, time.Time) error
+}
+
+// TaskPreviews stops a task's previews before its worktree is removed.
+type TaskPreviews interface {
+	StopTask(erkaruntime.TaskID)
 }
 
 type TaskSession interface {
@@ -64,6 +72,10 @@ type ServiceOptions struct {
 	ClaimDuration  time.Duration
 	WorkerPoll     time.Duration
 	ApprovalExpiry time.Duration
+	Previews       TaskPreviews
+	// OnError receives background maintenance failures, such as a task that
+	// cannot be finalized, which must not stop the worker.
+	OnError func(error)
 }
 
 type Service struct {
@@ -77,6 +89,8 @@ type Service struct {
 	claimDuration  time.Duration
 	workerPoll     time.Duration
 	approvalExpiry time.Duration
+	previews       TaskPreviews
+	onError        func(error)
 	wake           chan struct{}
 	mu             sync.Mutex
 	active         map[erkaruntime.TaskID]TaskSession
@@ -104,7 +118,10 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if options.ApprovalExpiry <= 0 {
 		options.ApprovalExpiry = 7 * 24 * time.Hour
 	}
-	return &Service{stateDir: filepath.Clean(options.StateDir), store: options.Store, runtimeStore: options.RuntimeStore, worktrees: options.Worktrees, openSession: options.OpenSession, ids: options.IDs, clock: options.Clock, claimDuration: options.ClaimDuration, workerPoll: options.WorkerPoll, approvalExpiry: options.ApprovalExpiry, wake: make(chan struct{}, 1), active: make(map[erkaruntime.TaskID]TaskSession)}, nil
+	if options.OnError == nil {
+		options.OnError = func(error) {}
+	}
+	return &Service{stateDir: filepath.Clean(options.StateDir), store: options.Store, runtimeStore: options.RuntimeStore, worktrees: options.Worktrees, openSession: options.OpenSession, ids: options.IDs, clock: options.Clock, claimDuration: options.ClaimDuration, workerPoll: options.WorkerPoll, approvalExpiry: options.ApprovalExpiry, previews: options.Previews, onError: options.OnError, wake: make(chan struct{}, 1), active: make(map[erkaruntime.TaskID]TaskSession)}, nil
 }
 
 func (service *Service) RegisterProject(ctx context.Context, name, repositoryRoot, defaultRef string) (store.ServerProject, error) {
@@ -212,6 +229,12 @@ func (service *Service) AddMessage(ctx context.Context, taskID erkaruntime.TaskI
 	if task.Status == store.ServerTaskRunning || task.Status == store.ServerTaskQueued || task.Status == store.ServerTaskCancelled {
 		return fmt.Errorf("task %q cannot accept a message while %s", taskID, task.Status)
 	}
+	if !task.FinalizedAt.IsZero() {
+		return fmt.Errorf("task %q was %s and is closed; start a new task: %w", taskID, task.Outcome, erkaruntime.ErrConflict)
+	}
+	if err := service.store.SupersedeReviews(ctx, taskID, service.clock().UTC()); err != nil {
+		return err
+	}
 	session, err := service.openSession(ctx, task.WorktreeRoot)
 	if err != nil {
 		return err
@@ -277,7 +300,83 @@ func (service *Service) Diff(ctx context.Context, taskID erkaruntime.TaskID) (st
 	if err != nil {
 		return "", err
 	}
+	if !task.FinalizedAt.IsZero() {
+		if task.ResultCommit == "" {
+			return "", nil
+		}
+		project, err := service.store.LoadServerProject(ctx, task.ServerProjectID)
+		if err != nil {
+			return "", err
+		}
+		return service.worktrees.CommitDiff(ctx, project.RepositoryRoot, task.ResultBase, task.ResultCommit)
+	}
 	return service.worktrees.Diff(ctx, task.WorktreeRoot)
+}
+
+// finalizePending turns reviewed worktrees into branches (accepted) or
+// hidden refs (rejected) and removes them. It is idempotent, so a crash
+// between the decision and the Git work is repaired on the next pass.
+func (service *Service) finalizePending(ctx context.Context) {
+	pending, err := service.store.PendingFinalizations(ctx, 20)
+	if err != nil {
+		service.onError(fmt.Errorf("list reviewed tasks: %w", err))
+		return
+	}
+	for _, item := range pending {
+		if err := service.finalize(ctx, item); err != nil && ctx.Err() == nil {
+			service.onError(fmt.Errorf("finalize task %s: %w", item.Task.TaskID, err))
+		}
+	}
+}
+
+func (service *Service) finalize(ctx context.Context, item store.Finalization) error {
+	task := item.Task
+	project, err := service.store.LoadServerProject(ctx, task.ServerProjectID)
+	if err != nil {
+		return err
+	}
+	snapshot, err := service.runtimeStore.LoadTask(ctx, task.TaskID)
+	if err != nil {
+		return err
+	}
+	outcome, ref := store.TaskAccepted, "refs/heads/"+ResultBranch(task.TaskID)
+	if item.Decision == store.ApprovalRejected {
+		outcome, ref = store.TaskRejected, "refs/erka/rejected/"+shortTaskID(task.TaskID)
+	}
+	if service.previews != nil {
+		service.previews.StopTask(task.TaskID)
+	}
+	result, err := service.worktrees.Finalize(ctx, FinalizeRequest{Source: project.RepositoryRoot, Worktree: task.WorktreeRoot, Ref: ref, Message: commitMessage(task.TaskID, snapshot.Objective), BaseRef: project.DefaultRef})
+	if err != nil {
+		return err
+	}
+	err = service.store.FinalizeServerTask(ctx, task.TaskID, outcome, strings.TrimPrefix(result.Ref, "refs/heads/"), result.Base, result.Commit, service.clock().UTC())
+	if errors.Is(err, erkaruntime.ErrConflict) {
+		return nil
+	}
+	return err
+}
+
+// ResultBranch is the branch an accepted task's changes are committed to.
+func ResultBranch(taskID erkaruntime.TaskID) string { return "erka/" + shortTaskID(taskID) }
+
+func shortTaskID(taskID erkaruntime.TaskID) string {
+	value := strings.TrimPrefix(string(taskID), "task_")
+	if len(value) > 12 {
+		value = value[:12]
+	}
+	return value
+}
+
+func commitMessage(taskID erkaruntime.TaskID, objective string) string {
+	subject := strings.Join(strings.Fields(objective), " ")
+	if len(subject) > 72 {
+		subject = strings.ToValidUTF8(subject[:69], "") + "..."
+	}
+	if subject == "" {
+		subject = "erka task " + string(taskID)
+	}
+	return subject + "\n\nerka task: " + string(taskID) + "\n\nRequest:\n" + strings.TrimSpace(objective) + "\n"
 }
 
 // DecideApproval records a person's decision. Questions and permission
@@ -289,6 +388,9 @@ func (service *Service) DecideApproval(ctx context.Context, decision store.Appro
 	approval, err := service.store.LoadApproval(ctx, decision.ID)
 	if err != nil {
 		return store.Approval{}, err
+	}
+	if approval.Kind == "accept_changes" {
+		service.finalizePending(ctx)
 	}
 	if err := service.resumeAfterResponse(ctx, approval); err != nil {
 		return approval, err
@@ -362,6 +464,7 @@ func (service *Service) RunWorker(ctx context.Context, holder string) error {
 			if err := service.expireApprovals(ctx); err != nil && ctx.Err() == nil {
 				return err
 			}
+			service.finalizePending(ctx)
 		}
 		worked, err := service.ExecuteNext(ctx, holder)
 		if err != nil && ctx.Err() == nil {

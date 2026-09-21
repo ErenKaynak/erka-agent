@@ -209,7 +209,17 @@ func newRemoteShowCommand(load func(context.Context) (config.Resolved, error), s
 		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(command.OutOrStdout(), "ID: %s\nProject: %s\nStatus: %s\nRuntime: %s\nObjective: %s\n", task.ID, task.ProjectID, task.Status, task.RuntimeStatus, task.Objective)
+		if _, err := fmt.Fprintf(command.OutOrStdout(), "ID: %s\nProject: %s\nStatus: %s\nRuntime: %s\nObjective: %s\n", task.ID, task.ProjectID, task.Status, task.RuntimeStatus, task.Objective); err != nil {
+			return err
+		}
+		switch {
+		case task.ResultBranch != "":
+			_, err = fmt.Fprintf(command.OutOrStdout(), "Outcome: accepted on branch %s (%s)\n", task.ResultBranch, shortCommit(task.ResultCommit))
+		case task.Outcome == "rejected" && task.ResultRef != "":
+			_, err = fmt.Fprintf(command.OutOrStdout(), "Outcome: rejected; changes kept at %s (%s)\n", task.ResultRef, shortCommit(task.ResultCommit))
+		case task.Outcome != "":
+			_, err = fmt.Fprintf(command.OutOrStdout(), "Outcome: %s with no changes\n", task.Outcome)
+		}
 		return err
 	}}
 }
@@ -288,4 +298,11 @@ func oneNonEmptyArg(message string) cobra.PositionalArgs {
 		}
 		return nil
 	}
+}
+
+func shortCommit(commit string) string {
+	if len(commit) > 12 {
+		return commit[:12]
+	}
+	return commit
 }

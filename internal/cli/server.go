@@ -215,15 +215,17 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 		return err
 	}
 	openSession := configuredServerSessionFactory(resolved, manager, interactor)
+	previews := erkaserver.NewPreviewManager(resolved.Server.Previews, resolved.StateDir)
+	defer previews.StopAll()
 	service, err := erkaserver.NewService(erkaserver.ServiceOptions{
 		StateDir: resolved.StateDir, Store: database, RuntimeStore: database,
 		OpenSession: openSession, WorkerPoll: options.poll, ClaimDuration: options.claim,
+		Previews: previews,
+		OnError:  func(err error) { _, _ = fmt.Fprintf(output, "erka server: %v\n", err) },
 	})
 	if err != nil {
 		return err
 	}
-	previews := erkaserver.NewPreviewManager(resolved.Server.Previews, resolved.StateDir)
-	defer previews.StopAll()
 	api, err := erkaserver.NewAPI(erkaserver.APIOptions{
 		Service: service, Store: database, SSEHeartbeat: options.heartbeat,
 		Connections: serverConnections(resolved), Models: serverModels(resolved, manager), Pipelines: serverPipelines(resolved),

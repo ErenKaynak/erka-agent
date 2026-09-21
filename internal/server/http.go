@@ -496,6 +496,16 @@ func (api *API) taskResponse(ctx context.Context, task store.ServerTask) taskDTO
 	result := taskDTO{
 		ID: string(task.TaskID), ProjectID: task.ServerProjectID, Status: string(task.Status),
 		CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt,
+		Outcome: string(task.Outcome), ResultCommit: task.ResultCommit,
+	}
+	if !task.FinalizedAt.IsZero() {
+		finalized := task.FinalizedAt
+		result.FinalizedAt = &finalized
+		if task.Outcome == store.TaskAccepted {
+			result.ResultBranch = task.ResultRef
+		} else {
+			result.ResultRef = task.ResultRef
+		}
 	}
 	if snapshot, err := api.store.LoadTask(ctx, task.TaskID); err == nil {
 		result.RuntimeStatus = string(snapshot.Status)
@@ -601,6 +611,13 @@ type taskDTO struct {
 	LastEventSequence uint64    `json:"lastEventSequence"`
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`
+	// Outcome is accepted or rejected once the review is finalized; accepted
+	// changes live on ResultBranch at ResultCommit.
+	Outcome      string     `json:"outcome,omitempty"`
+	ResultBranch string     `json:"resultBranch,omitempty"`
+	ResultRef    string     `json:"resultRef,omitempty"`
+	ResultCommit string     `json:"resultCommit,omitempty"`
+	FinalizedAt  *time.Time `json:"finalizedAt,omitempty"`
 }
 
 type itemDTO struct {

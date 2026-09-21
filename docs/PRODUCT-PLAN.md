@@ -18,7 +18,7 @@ own server. The promise, in order of importance:
 3. It costs less, because work is routed to the cheapest capable model.
 4. It works remotely without a vendor cloud.
 
-## Phase 0 — Protect the work (now)
+## Phase 0 — Protect the work (done 2026-09-21)
 
 - Feature branch, logical commits, and a pushed backup of all current work.
 - Track design documents and ADRs; keep only personal notes ignored.
@@ -30,16 +30,17 @@ own server. The promise, in order of importance:
 **Exit:** a clean clone on another machine builds and passes the full suite;
 no work exists only in a working tree.
 
-## Phase 1 — Trust: safe by default
+## Phase 1 — Trust: safe by default (in progress)
 
 A product that can run commands must be trustworthy before it is featureful.
 
 - **OS sandbox** behind the existing sandbox interface: `sandbox-exec` on
   macOS, bubblewrap or Landlock on Linux; writes limited to the workspace,
   network off unless allowed. God mode is the only unsandboxed mode.
-- **Accept → branch workflow:** accepting a server task commits its worktree
-  to `erka/<task>`, optionally pushes or opens a PR, then removes the
-  worktree. Rejecting removes it.
+- **Accept → branch workflow** (done): accepting a server task commits its
+  worktree to `erka/<task>` and removes the worktree; rejecting keeps the
+  changes at a hidden ref. Pushing and PR creation arrive with the Phase 2
+  Git tools.
 - **Previews behind approval** when a task changed files the preset executes,
   and inside the sandbox.
 - **Memory integrity:** model-saved notes are shown in the transcript,

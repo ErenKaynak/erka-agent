@@ -27,6 +27,9 @@ configuration and API between minor releases.
 - `erka -s <session>` resumes a conversation by ID prefix; quitting prints the
   command.
 - `erka version` reports the Git commit and build time for development builds.
+- Accepting a server task commits its worktree to `erka/<task>` and removes
+  the worktree; rejecting keeps the changes at `refs/erka/rejected/<task>`.
+  Finalization is crash-safe, never runs repository hooks, and closes the task.
 
 ### Changed
 - Interactive sessions offer `run_command` with per-call consent instead of

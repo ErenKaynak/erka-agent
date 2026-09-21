@@ -56,6 +56,10 @@ type Task struct {
 	LastEventSequence uint64    `json:"lastEventSequence"`
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`
+	Outcome           string    `json:"outcome"`
+	ResultBranch      string    `json:"resultBranch"`
+	ResultRef         string    `json:"resultRef"`
+	ResultCommit      string    `json:"resultCommit"`
 }
 
 type Event struct {

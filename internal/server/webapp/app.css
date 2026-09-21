@@ -72,8 +72,8 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .06em; color: v
 }
 .badge.waiting { background: var(--warn-bg); color: var(--warn); }
 .badge.running, .badge.queued { color: var(--accent); }
-.badge.completed { color: var(--ok); }
-.badge.failed, .badge.cancelled { color: var(--danger); }
+.badge.completed, .badge.accepted { color: var(--ok); }
+.badge.failed, .badge.cancelled, .badge.rejected { color: var(--danger); }
 button, .button {
   font: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
   min-height: 44px; padding: 10px 16px; border-radius: 8px;
