@@ -64,6 +64,30 @@ type Approval struct {
 	RequestedAt time.Time
 	ExpiresAt   time.Time
 	DecidedAt   time.Time
+	// Tool, Details, and Options describe question and permission requests.
+	Tool    string
+	Details json.RawMessage
+	Options []string
+	// Response is the user's answer or note; Scope "task" extends an approved
+	// permission to later calls of the same tool in the same task.
+	Response string
+	Scope    ApprovalScope
+}
+
+type ApprovalScope string
+
+const (
+	ApprovalScopeOnce ApprovalScope = "once"
+	ApprovalScopeTask ApprovalScope = "task"
+)
+
+type ApprovalDecision struct {
+	ID       string
+	Actor    string
+	Status   ApprovalStatus
+	Response string
+	Scope    ApprovalScope
+	Time     time.Time
 }
 
 type APIToken struct {
@@ -209,14 +233,31 @@ func (store *SQLite) FinishServerTask(ctx context.Context, taskID erkaruntime.Ta
 	if status != ServerTaskWaiting && status != ServerTaskCompleted && status != ServerTaskFailed && status != ServerTaskCancelled {
 		return fmt.Errorf("invalid terminal server task status %q", status)
 	}
-	result, err := store.db.ExecContext(ctx, `UPDATE server_tasks SET status = ?, claim_holder = NULL, claim_expires_at = NULL, updated_at = ? WHERE task_id = ? AND status = 'running' AND claim_holder = ?`, status, formatTime(now), taskID, holder)
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE server_tasks SET status = ?, claim_holder = NULL, claim_expires_at = NULL, updated_at = ? WHERE task_id = ? AND status = 'running' AND claim_holder = ?`, status, formatTime(now), taskID, holder)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return erkaruntime.ErrConflict
 	}
-	return nil
+	switch status {
+	case ServerTaskFailed:
+		err = insertNotification(ctx, tx, taskNotification(taskID, "task.failed", "Task failed", "The task stopped with an error. Inspect its events, then retry or send a follow-up.", now))
+	case ServerTaskWaiting:
+		var pending int
+		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM approvals WHERE task_id = ? AND status = 'pending'`, taskID).Scan(&pending); err == nil && pending == 0 {
+			err = insertNotification(ctx, tx, taskNotification(taskID, "task.waiting", "Task needs attention", "An interrupted tool outcome needs inspection before the task can continue.", now))
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (store *SQLite) CompleteServerTaskWithApproval(ctx context.Context, taskID erkaruntime.TaskID, holder string, approval Approval) error {
@@ -238,13 +279,11 @@ func (store *SQLite) CompleteServerTaskWithApproval(ctx context.Context, taskID 
 	if count, _ := result.RowsAffected(); count != 1 {
 		return erkaruntime.ErrConflict
 	}
-	var expires any
-	if !approval.ExpiresAt.IsZero() {
-		expires = formatTime(approval.ExpiresAt)
+	if err := insertApproval(ctx, tx, approval); err != nil {
+		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO approvals(id, task_id, kind, message, status, requested_at, expires_at) VALUES(?, ?, ?, ?, ?, ?, ?)`, approval.ID, approval.TaskID, approval.Kind, approval.Message, approval.Status, formatTime(approval.RequestedAt), expires)
-	if err != nil {
-		return mapInsertError(err, "approval", approval.ID)
+	if err := insertNotification(ctx, tx, approvalNotification(approval)); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -280,24 +319,40 @@ func (store *SQLite) CancelServerTask(ctx context.Context, taskID erkaruntime.Ta
 	return count == 1, err
 }
 
+// CreateApproval records a pending approval and its notification atomically.
 func (store *SQLite) CreateApproval(ctx context.Context, approval Approval) error {
 	if err := validateApproval(approval); err != nil {
 		return err
 	}
-	var expires any
-	if !approval.ExpiresAt.IsZero() {
-		expires = formatTime(approval.ExpiresAt)
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	_, err := store.db.ExecContext(ctx, `INSERT INTO approvals(id, task_id, kind, message, status, requested_at, expires_at) VALUES(?, ?, ?, ?, ?, ?, ?)`, approval.ID, approval.TaskID, approval.Kind, approval.Message, approval.Status, formatTime(approval.RequestedAt), expires)
-	return mapInsertError(err, "approval", approval.ID)
+	defer func() { _ = tx.Rollback() }()
+	if err := insertApproval(ctx, tx, approval); err != nil {
+		return err
+	}
+	if err := insertNotification(ctx, tx, approvalNotification(approval)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
+const approvalColumns = `id, task_id, kind, message, status, actor, requested_at, expires_at, decided_at, tool, details_json, options_json, response, scope`
+
 func (store *SQLite) LoadApproval(ctx context.Context, id string) (Approval, error) {
-	return scanApproval(store.db.QueryRowContext(ctx, `SELECT id, task_id, kind, message, status, actor, requested_at, expires_at, decided_at FROM approvals WHERE id = ?`, id), id)
+	return scanApproval(store.db.QueryRowContext(ctx, `SELECT `+approvalColumns+` FROM approvals WHERE id = ?`, id), id)
+}
+
+// HasTaskGrant reports whether the user approved a tool for the rest of a task.
+func (store *SQLite) HasTaskGrant(ctx context.Context, taskID erkaruntime.TaskID, tool string) (bool, error) {
+	var count int
+	err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM approvals WHERE task_id = ? AND kind = 'permission' AND tool = ? AND status = 'approved' AND scope = 'task'`, taskID, tool).Scan(&count)
+	return count > 0, err
 }
 
 func (store *SQLite) ListApprovals(ctx context.Context, taskID erkaruntime.TaskID, status ApprovalStatus) ([]Approval, error) {
-	query := `SELECT id, task_id, kind, message, status, actor, requested_at, expires_at, decided_at FROM approvals WHERE 1 = 1`
+	query := `SELECT ` + approvalColumns + ` FROM approvals WHERE 1 = 1`
 	args := []any(nil)
 	if taskID != "" {
 		query += ` AND task_id = ?`
@@ -325,10 +380,29 @@ func (store *SQLite) ListApprovals(ctx context.Context, taskID erkaruntime.TaskI
 }
 
 func (store *SQLite) DecideApproval(ctx context.Context, id, actor string, decision ApprovalStatus, now time.Time) error {
-	if strings.TrimSpace(actor) == "" || now.IsZero() || (decision != ApprovalApproved && decision != ApprovalRejected) {
+	return store.RecordApprovalDecision(ctx, ApprovalDecision{ID: id, Actor: actor, Status: decision, Time: now})
+}
+
+// RecordApprovalDecision decides a pending, unexpired approval exactly once.
+func (store *SQLite) RecordApprovalDecision(ctx context.Context, decision ApprovalDecision) error {
+	if strings.TrimSpace(decision.Actor) == "" || decision.Time.IsZero() || (decision.Status != ApprovalApproved && decision.Status != ApprovalRejected) {
 		return errors.New("approval decision requires actor, time, and approved or rejected status")
 	}
-	result, err := store.db.ExecContext(ctx, `UPDATE approvals SET status = ?, actor = ?, decided_at = ? WHERE id = ? AND status = 'pending' AND (expires_at IS NULL OR expires_at > ?)`, decision, actor, formatTime(now), id, formatTime(now))
+	if decision.Scope == "" {
+		decision.Scope = ApprovalScopeOnce
+	}
+	if decision.Scope != ApprovalScopeOnce && decision.Scope != ApprovalScopeTask {
+		return fmt.Errorf("unsupported approval scope %q", decision.Scope)
+	}
+	if len(decision.Response) > maxApprovalResponseBytes {
+		return fmt.Errorf("approval response exceeds %d bytes", maxApprovalResponseBytes)
+	}
+	var response any
+	if strings.TrimSpace(decision.Response) != "" {
+		response = strings.TrimSpace(decision.Response)
+	}
+	now := decision.Time
+	result, err := store.db.ExecContext(ctx, `UPDATE approvals SET status = ?, actor = ?, decided_at = ?, response = ?, scope = ? WHERE id = ? AND status = 'pending' AND (expires_at IS NULL OR expires_at > ?) AND (? = 'once' OR kind = 'permission')`, decision.Status, decision.Actor, formatTime(now), response, decision.Scope, decision.ID, formatTime(now), decision.Scope)
 	if err != nil {
 		return err
 	}
@@ -512,17 +586,25 @@ func scanServerTask(row rowScanner, id erkaruntime.TaskID) (ServerTask, error) {
 
 func scanApproval(row rowScanner, id string) (Approval, error) {
 	var approval Approval
-	var status, requested string
-	var actor, expires, decided sql.NullString
-	if err := row.Scan(&approval.ID, &approval.TaskID, &approval.Kind, &approval.Message, &status, &actor, &requested, &expires, &decided); err != nil {
+	var status, requested, scope string
+	var actor, expires, decided, tool, response sql.NullString
+	var details, options []byte
+	if err := row.Scan(&approval.ID, &approval.TaskID, &approval.Kind, &approval.Message, &status, &actor, &requested, &expires, &decided, &tool, &details, &options, &response, &scope); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Approval{}, fmt.Errorf("approval %q: %w", id, erkaruntime.ErrNotFound)
 		}
 		return Approval{}, err
 	}
 	approval.Status = ApprovalStatus(status)
-	if actor.Valid {
-		approval.Actor = actor.String
+	approval.Scope = ApprovalScope(scope)
+	approval.Actor, approval.Tool, approval.Response = actor.String, tool.String, response.String
+	if len(details) > 0 {
+		approval.Details = append(json.RawMessage(nil), details...)
+	}
+	if len(options) > 0 {
+		if err := json.Unmarshal(options, &approval.Options); err != nil {
+			return Approval{}, fmt.Errorf("decode approval %q options: %w", approval.ID, err)
+		}
 	}
 	var err error
 	approval.RequestedAt, err = parseTime(requested)
