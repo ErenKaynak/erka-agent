@@ -22,6 +22,8 @@ type BridgeBackend struct {
 	Limits           NativeLimits
 	IDs              IDGenerator
 	Clock            func() time.Time
+	// Memory is recalled long-term memory included in the bridge prompt.
+	Memory string
 }
 
 func (*BridgeBackend) BackendClass() string { return BackendSubscriptionBridge }
@@ -86,7 +88,7 @@ func (backend *BridgeBackend) RunStage(ctx context.Context, request StageRequest
 	if err != nil {
 		return StageResult{}, bridgeFail(ctx, appender, "context_runs_failed", err)
 	}
-	packet, err := CompileStageContext(ContextRequest{Stage: request.Stage, TaskID: request.TaskID, RunID: request.RunID, Items: items, Runs: runs, MaxBytes: request.ContextMaxBytes})
+	packet, err := CompileStageContext(ContextRequest{Stage: request.Stage, TaskID: request.TaskID, RunID: request.RunID, Items: items, Runs: runs, MaxBytes: request.ContextMaxBytes, Memory: backend.Memory})
 	if err != nil {
 		return StageResult{}, bridgeFail(ctx, appender, "context_compile_failed", err)
 	}

@@ -82,6 +82,12 @@ type NativeBackend struct {
 	Limits       NativeLimits
 	IDs          IDGenerator
 	Clock        func() time.Time
+	// Interactor, when set, exposes ask_user and resolves permission requests.
+	Interactor Interactor
+	// ApprovalTools names tools whose calls require consent through Interactor.
+	ApprovalTools []string
+	// Memory is recalled long-term memory added to every model request.
+	Memory string
 }
 
 func (*NativeBackend) BackendClass() string { return BackendNative }
@@ -123,9 +129,12 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 		return StageResult{}, err
 	}
 	toolOutputBytes := int64(0)
-	if history, toolOutputBytes, err = prepared.recoverPending(ctx, appender, history, toolOutputBytes); err != nil {
+	if history, toolOutputBytes, err = prepared.recoverPending(ctx, appender, request, history, toolOutputBytes); err != nil {
 		if errors.Is(err, ErrUnknownMutatingToolOutcome) {
 			return StageResult{Status: TaskWaiting}, err
+		}
+		if errors.Is(err, ErrAwaitingUser) {
+			return StageResult{Status: TaskWaitingApproval}, err
 		}
 		return StageResult{}, prepared.fail(ctx, appender, "tool_recovery_failed", err)
 	}
@@ -137,13 +146,13 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 		if err := ctx.Err(); err != nil {
 			return StageResult{}, err
 		}
-		instructions, modelItems := prepared.Instructions, history
+		instructions, modelItems := WithMemory(prepared.Instructions, prepared.Memory), history
 		if request.Stage != "" {
 			runs, loadErr := loadContextRuns(ctx, store, request.RunID, history)
 			if loadErr != nil {
 				return StageResult{}, prepared.fail(ctx, appender, "context_runs_failed", loadErr)
 			}
-			packet, compileErr := CompileStageContext(ContextRequest{Stage: request.Stage, TaskID: request.TaskID, RunID: request.RunID, Items: history, Runs: runs, MaxBytes: request.ContextMaxBytes})
+			packet, compileErr := CompileStageContext(ContextRequest{Stage: request.Stage, TaskID: request.TaskID, RunID: request.RunID, Items: history, Runs: runs, MaxBytes: request.ContextMaxBytes, Memory: prepared.Memory})
 			if compileErr != nil {
 				return StageResult{}, prepared.fail(ctx, appender, "context_compile_failed", compileErr)
 			}
@@ -190,16 +199,22 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 			return prepared.complete(ctx, appender, request, response.text, cumulativeUsage, iteration, mutated)
 		}
 
-		for _, call := range calls {
+		for index, call := range calls {
 			prepared.observe(ctx, LiveUpdate{TaskID: request.TaskID, RunID: request.RunID, Kind: LiveToolStarted, Tool: call.Tool, CallID: call.CallID})
 			if call.Mutating {
 				mutated = true
 				appender.mutated = true
 			}
-			result, executeErr := prepared.executeTool(ctx, call, toolOutputBytes)
+			result, executeErr := prepared.executeTool(ctx, appender, request, call, toolOutputBytes)
 			if executeErr != nil {
 				if errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded) {
 					return StageResult{}, executeErr
+				}
+				if errors.Is(executeErr, ErrAwaitingUser) {
+					if err := prepared.park(ctx, appender, calls[index:]); err != nil {
+						return StageResult{}, err
+					}
+					return StageResult{Status: TaskWaitingApproval, Usage: cumulativeUsage, Iterations: iteration, Mutated: mutated}, executeErr
 				}
 				result = ToolExecutionResult{Output: executeErr.Error(), IsError: true}
 			}
@@ -294,9 +309,15 @@ func (backend *NativeBackend) prepare() (*preparedBackend, error) {
 	if clock == nil {
 		clock = func() time.Time { return time.Now().UTC() }
 	}
-	tools := make(map[string]Tool, len(backend.Tools))
-	schemas := make(map[string]*jsonschema.Schema, len(backend.Tools))
-	for index, tool := range backend.Tools {
+	available := append([]Tool(nil), backend.Tools...)
+	if backend.Interactor != nil {
+		available = append(available, askUserTool{})
+	} else if len(backend.ApprovalTools) > 0 {
+		return nil, errors.New("native backend approval tools require an interactor")
+	}
+	tools := make(map[string]Tool, len(available))
+	schemas := make(map[string]*jsonschema.Schema, len(available))
+	for index, tool := range available {
 		if tool == nil {
 			return nil, fmt.Errorf("tool %d is nil", index)
 		}
@@ -323,6 +344,7 @@ func (backend *NativeBackend) prepare() (*preparedBackend, error) {
 		schemas[definition.Name] = schema
 	}
 	copy := *backend
+	copy.Tools = available
 	copy.Limits = limits
 	copy.IDs = ids
 	copy.Clock = clock
@@ -486,7 +508,7 @@ func responseEvents(response assembledResponse) []pendingEvent {
 	return events
 }
 
-func (backend *preparedBackend) executeTool(ctx context.Context, call ToolCall, alreadyConsumed int64) (ToolExecutionResult, error) {
+func (backend *preparedBackend) executeTool(ctx context.Context, appender *durableAppender, request StageRequest, call ToolCall, alreadyConsumed int64) (ToolExecutionResult, error) {
 	tool := backend.toolByName[call.Tool]
 	if tool == nil {
 		return ToolExecutionResult{Output: fmt.Sprintf("unknown tool %q", call.Tool), IsError: true}, nil
@@ -509,6 +531,36 @@ func (backend *preparedBackend) executeTool(ctx context.Context, call ToolCall, 
 	if alreadyConsumed >= backend.Limits.MaxCumulativeToolOutputBytes {
 		return ToolExecutionResult{Output: "tool output budget exhausted", IsError: true, Truncated: true}, nil
 	}
+	if call.Tool == AskUserToolName && backend.Interactor != nil {
+		return backend.askUser(ctx, request, call)
+	}
+	if backend.requiresApproval(call.Tool) {
+		response, err := backend.Interactor.Request(ctx, UserRequest{
+			Key: UserRequestKey(request.TaskID, call.CallID, UserPermission), TaskID: request.TaskID, RunID: request.RunID,
+			CallID: call.CallID, Kind: UserPermission, Tool: call.Tool, Message: permissionMessage(call),
+			Details: append(json.RawMessage(nil), call.Arguments...),
+		})
+		if err != nil {
+			return ToolExecutionResult{}, err
+		}
+		if !response.Approved {
+			output := "The user denied permission for this call. Do not retry it unchanged."
+			if answer := strings.TrimSpace(response.Answer); answer != "" {
+				output += " User note: " + answer
+			}
+			return ToolExecutionResult{Output: output, IsError: true}, nil
+		}
+	}
+	if definition.Mutating && backend.Interactor != nil && appender != nil {
+		// The marker separates calls parked before execution from calls whose
+		// outcome became unknown, so recovery never replays a started mutation.
+		if _, err := appender.append(ctx, nil, []pendingEvent{{
+			Type: "tool.executing", Message: fmt.Sprintf("%s executing", call.Tool),
+			Data: eventData(map[string]any{"tool": call.Tool, "call_id": call.CallID}),
+		}}); err != nil {
+			return ToolExecutionResult{}, err
+		}
+	}
 	result, err := tool.Execute(ctx, invocation)
 	if err != nil {
 		return result, err
@@ -517,7 +569,7 @@ func (backend *preparedBackend) executeTool(ctx context.Context, call ToolCall, 
 	return result, nil
 }
 
-func (backend *preparedBackend) recoverPending(ctx context.Context, appender *durableAppender, history []RuntimeItem, consumed int64) ([]RuntimeItem, int64, error) {
+func (backend *preparedBackend) recoverPending(ctx context.Context, appender *durableAppender, request StageRequest, history []RuntimeItem, consumed int64) ([]RuntimeItem, int64, error) {
 	pending := make(map[ToolCallID]ToolCall)
 	order := make([]ToolCallID, 0)
 	for _, item := range history {
@@ -530,17 +582,26 @@ func (backend *preparedBackend) recoverPending(ctx context.Context, appender *du
 			consumed += int64(len(item.ToolResult.Output))
 		}
 	}
+	remaining := make([]ToolCall, 0, len(pending))
 	for _, callID := range order {
-		call, exists := pending[callID]
-		if !exists {
-			continue
+		if call, exists := pending[callID]; exists {
+			remaining = append(remaining, call)
 		}
+	}
+	var unstarted map[ToolCallID]bool
+	for index, call := range remaining {
 		tool := backend.toolByName[call.Tool]
 		mutating := call.Mutating
 		if tool != nil {
 			mutating = tool.Definition().Mutating
 		}
-		if mutating {
+		if mutating && unstarted == nil {
+			var err error
+			if unstarted, err = unstartedCalls(ctx, appender); err != nil {
+				return history, consumed, err
+			}
+		}
+		if mutating && !unstarted[call.CallID] {
 			event := pendingEvent{
 				Type: "task.waiting", Message: "A mutating tool outcome requires inspection",
 				Data: eventData(map[string]any{"tool": call.Tool, "call_id": call.CallID}),
@@ -550,10 +611,13 @@ func (backend *preparedBackend) recoverPending(ctx context.Context, appender *du
 			}
 			return history, consumed, fmt.Errorf("%w: %s (%s)", ErrUnknownMutatingToolOutcome, call.Tool, call.CallID)
 		}
-		result, executeErr := backend.executeTool(ctx, call, consumed)
+		result, executeErr := backend.executeTool(ctx, appender, request, call, consumed)
 		if executeErr != nil {
 			if errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded) {
 				return history, consumed, executeErr
+			}
+			if errors.Is(executeErr, ErrAwaitingUser) {
+				return history, consumed, errors.Join(backend.park(ctx, appender, remaining[index:]), executeErr)
 			}
 			result = ToolExecutionResult{Output: executeErr.Error(), IsError: true}
 		}
@@ -708,6 +772,8 @@ func (appender *durableAppender) start(ctx context.Context, objective string, st
 		return err
 	case TaskCoding:
 		return nil
+	case TaskWaitingApproval:
+		return appender.transition(ctx, TaskCoding, []pendingEvent{{Type: "task.resumed", Message: "Resumed after the user responded"}})
 	default:
 		return fmt.Errorf("task %q cannot run from status %q", appender.taskID, appender.snapshot.Status)
 	}
@@ -835,7 +901,7 @@ func runStatusForTaskStatus(status TaskStatus) RunStatus {
 	switch status {
 	case TaskPlanning, TaskCoding, TaskValidating, TaskReviewing:
 		return RunRunning
-	case TaskWaiting:
+	case TaskWaiting, TaskWaitingApproval:
 		return RunWaiting
 	case TaskCompleted:
 		return RunCompleted

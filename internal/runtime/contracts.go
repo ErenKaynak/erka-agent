@@ -278,10 +278,10 @@ var ErrInvalidRunTransition = errors.New("invalid run state transition")
 var allowedTransitions = map[TaskStatus]map[TaskStatus]bool{
 	TaskQueued:          {TaskPreparing: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskPreparing:       {TaskPlanning: true, TaskCoding: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
-	TaskPlanning:        {TaskCoding: true, TaskWaitingApproval: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
+	TaskPlanning:        {TaskCoding: true, TaskCompleted: true, TaskWaitingApproval: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskCoding:          {TaskValidating: true, TaskReviewing: true, TaskCompleted: true, TaskWaiting: true, TaskWaitingApproval: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
-	TaskValidating:      {TaskCoding: true, TaskReviewing: true, TaskCompleted: true, TaskWaiting: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
-	TaskReviewing:       {TaskCompleted: true, TaskCoding: true, TaskWaiting: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
+	TaskValidating:      {TaskCoding: true, TaskReviewing: true, TaskCompleted: true, TaskWaiting: true, TaskWaitingApproval: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
+	TaskReviewing:       {TaskCompleted: true, TaskCoding: true, TaskWaiting: true, TaskWaitingApproval: true, TaskFailed: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskWaiting:         {TaskCoding: true, TaskValidating: true, TaskReviewing: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskWaitingApproval: {TaskPlanning: true, TaskCoding: true, TaskValidating: true, TaskReviewing: true, TaskCancelled: true, TaskTimedOut: true},
 	TaskCompleted:       {TaskPreparing: true},
