@@ -23,6 +23,7 @@
 | Web frontend | Deferred client | Stabilize runtime and API before rebuilding UI |
 | Design documents | Tracked in Git from 2026-09-21 | Planning, ADRs, and agent guidance must survive machine loss; only personal notes stay ignored |
 | Product plan | `docs/PRODUCT-PLAN.md` | Phased path to a public release with demonstrable exit criteria |
+| Product name | erka (final) | Owner decision, 2026-09-21 |
 
 ## Important terminology
 
@@ -37,7 +38,7 @@
 
 ## Decisions still requiring ADRs
 
-- Apache-2.0 versus AGPL-3.0 license.
+- Apache-2.0 versus AGPL-3.0 license, decided when the product is feature-complete and before public release.
 - Personal-server sandbox implementation after the interface is proven.
 - Remote authentication token format and reverse-proxy trust model.
 - Whether the stable server API reuses selected AI-LXC shapes or starts a clean

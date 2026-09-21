@@ -97,7 +97,7 @@ change unaided, timed under ten minutes.
 
 ## Phase 5 — Launch
 
-- License decision (Apache-2.0 vs AGPL-3.0) and trademark check for "erka".
+- License decision (Apache-2.0 vs AGPL-3.0) and a trademark check for "erka".
 - `SECURITY.md` with a disclosure process, `CONTRIBUTING.md`, code of
   conduct, issue and PR templates, and a provider contribution kit.
 - Private beta, feedback loop, then public release with a website and demo.
@@ -105,8 +105,13 @@ change unaided, timed under ten minutes.
 **Exit:** a public 1.0 release, a documented upgrade path, and a security
 contact that responds.
 
+## Owner decisions
+
+- The product name is **erka** (final, 2026-09-21).
+- The license is chosen when the product is feature-complete, before the
+  Phase 5 public release. Until then the repository grants no license.
+
 ## Open decisions for the owner
 
-- License (blocks any public release).
-- Whether the product name "erka" is final.
+- License choice (Apache-2.0 vs AGPL-3.0), due before Phase 5.
 - Whether diagnostics may ever leave the user's machine (default: never).
