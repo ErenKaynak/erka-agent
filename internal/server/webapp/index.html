@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101418" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="erka">
+<title>erka</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="#/">erka</a>
+  <nav>
+    <a href="#/" data-nav="inbox">Inbox</a>
+    <a href="#/new" data-nav="new">New</a>
+    <a href="#/memory" data-nav="memory">Memory</a>
+    <a href="#/settings" data-nav="settings">Settings</a>
+  </nav>
+</header>
+<main id="view" aria-live="polite"></main>
+<div id="toast" role="status" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

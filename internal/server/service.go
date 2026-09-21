@@ -14,7 +14,10 @@ import (
 	"github.com/ErenKaynak/erka-agent/internal/store"
 )
 
-const defaultClaimDuration = 30 * time.Second
+const (
+	defaultClaimDuration   = 30 * time.Second
+	approvalExpiryInterval = 30 * time.Second
+)
 
 type ControlStore interface {
 	CreateServerProject(context.Context, store.ServerProject) error
@@ -35,6 +38,8 @@ type ControlStore interface {
 	LoadApproval(context.Context, string) (store.Approval, error)
 	ListApprovals(context.Context, erkaruntime.TaskID, store.ApprovalStatus) ([]store.Approval, error)
 	DecideApproval(context.Context, string, string, store.ApprovalStatus, time.Time) error
+	RecordApprovalDecision(context.Context, store.ApprovalDecision) error
+	ExpireApprovals(context.Context, time.Time) (int64, error)
 }
 
 type TaskSession interface {
@@ -275,6 +280,68 @@ func (service *Service) Diff(ctx context.Context, taskID erkaruntime.TaskID) (st
 	return service.worktrees.Diff(ctx, task.WorktreeRoot)
 }
 
+// DecideApproval records a person's decision. Questions and permission
+// requests park their task, so deciding one requeues the task to resume.
+func (service *Service) DecideApproval(ctx context.Context, decision store.ApprovalDecision) (store.Approval, error) {
+	if err := service.store.RecordApprovalDecision(ctx, decision); err != nil {
+		return store.Approval{}, err
+	}
+	approval, err := service.store.LoadApproval(ctx, decision.ID)
+	if err != nil {
+		return store.Approval{}, err
+	}
+	if err := service.resumeAfterResponse(ctx, approval); err != nil {
+		return approval, err
+	}
+	return approval, nil
+}
+
+func (service *Service) resumeAfterResponse(ctx context.Context, approval store.Approval) error {
+	if approval.Kind != string(erkaruntime.UserQuestion) && approval.Kind != string(erkaruntime.UserPermission) {
+		return nil
+	}
+	task, err := service.store.LoadServerTask(ctx, approval.TaskID)
+	if err != nil {
+		return err
+	}
+	if task.Status != store.ServerTaskWaiting {
+		return nil
+	}
+	if err := service.store.QueueServerTask(ctx, approval.TaskID, service.clock().UTC()); err != nil && !errors.Is(err, erkaruntime.ErrConflict) {
+		return err
+	}
+	service.Wake()
+	return nil
+}
+
+// expireApprovals expires overdue requests and resumes the tasks they parked,
+// so an unanswered question never blocks a task forever.
+func (service *Service) expireApprovals(ctx context.Context) error {
+	now := service.clock().UTC()
+	pending, err := service.store.ListApprovals(ctx, "", store.ApprovalPending)
+	if err != nil {
+		return err
+	}
+	overdue := make([]store.Approval, 0)
+	for _, approval := range pending {
+		if !approval.ExpiresAt.IsZero() && !approval.ExpiresAt.After(now) {
+			overdue = append(overdue, approval)
+		}
+	}
+	if len(overdue) == 0 {
+		return nil
+	}
+	if _, err := service.store.ExpireApprovals(ctx, now); err != nil {
+		return err
+	}
+	for _, approval := range overdue {
+		if err := service.resumeAfterResponse(ctx, approval); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (service *Service) Wake() {
 	select {
 	case service.wake <- struct{}{}:
@@ -288,7 +355,14 @@ func (service *Service) RunWorker(ctx context.Context, holder string) error {
 	}
 	ticker := time.NewTicker(service.workerPoll)
 	defer ticker.Stop()
+	lastExpiry := time.Time{}
 	for {
+		if now := service.clock(); now.Sub(lastExpiry) >= approvalExpiryInterval {
+			lastExpiry = now
+			if err := service.expireApprovals(ctx); err != nil && ctx.Err() == nil {
+				return err
+			}
+		}
 		worked, err := service.ExecuteNext(ctx, holder)
 		if err != nil && ctx.Err() == nil {
 			return err
@@ -336,6 +410,27 @@ func (service *Service) ExecuteNext(ctx context.Context, holder string) (bool, e
 			return err
 		}
 		return service.store.FinishServerTask(context.Background(), task.TaskID, holder, status, service.clock().UTC())
+	}
+	// awaitUser parks the task. A person may answer before the worker parks,
+	// so a task with no pending request left is requeued immediately.
+	awaitUser := func() error {
+		if err := finish(store.ServerTaskWaiting); err != nil {
+			return err
+		}
+		pending, err := service.store.ListApprovals(context.Background(), task.TaskID, store.ApprovalPending)
+		if err != nil {
+			return err
+		}
+		for _, approval := range pending {
+			if approval.Kind == string(erkaruntime.UserQuestion) || approval.Kind == string(erkaruntime.UserPermission) {
+				return nil
+			}
+		}
+		if err := service.store.QueueServerTask(context.Background(), task.TaskID, service.clock().UTC()); err != nil {
+			return err
+		}
+		service.Wake()
+		return nil
 	}
 	release := func() error {
 		if err := stopClaim(); err != nil {
@@ -400,6 +495,9 @@ func (service *Service) ExecuteNext(ctx context.Context, holder string) (bool, e
 			return true, stopClaim()
 		}
 		conversation, loadErr := session.OpenConversation(context.Background(), task.TaskID)
+		if loadErr == nil && conversation.Task.Status == erkaruntime.TaskWaitingApproval {
+			return true, awaitUser()
+		}
 		if loadErr == nil && conversation.Task.Status == erkaruntime.TaskWaiting {
 			return true, finish(store.ServerTaskWaiting)
 		}
@@ -412,6 +510,8 @@ func (service *Service) ExecuteNext(ctx context.Context, holder string) (bool, e
 			return true, err
 		}
 		return true, service.completeClaim(context.Background(), task.TaskID, holder)
+	case erkaruntime.TaskWaitingApproval:
+		return true, awaitUser()
 	case erkaruntime.TaskWaiting:
 		return true, finish(store.ServerTaskWaiting)
 	case erkaruntime.TaskCancelled:

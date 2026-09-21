@@ -44,6 +44,8 @@ type APIOptions struct {
 	Connections  ResourceLoader
 	Models       ResourceLoader
 	Pipelines    ResourceLoader
+	Previews     *PreviewManager
+	Memories     MemoryAPIStore
 }
 
 type API struct {
@@ -55,6 +57,8 @@ type API struct {
 	connections  ResourceLoader
 	models       ResourceLoader
 	pipelines    ResourceLoader
+	previews     *PreviewManager
+	memories     MemoryAPIStore
 	handler      http.Handler
 }
 
@@ -87,6 +91,7 @@ func NewAPI(options APIOptions) (*API, error) {
 		service: options.Service, store: options.Store, clock: options.Clock,
 		ssePoll: options.SSEPoll, sseHeartbeat: options.SSEHeartbeat,
 		connections: options.Connections, models: options.Models, pipelines: options.Pipelines,
+		previews: options.Previews, memories: options.Memories,
 	}
 	api.handler = api.routes()
 	return api, nil
@@ -97,6 +102,8 @@ func (api *API) Handler() http.Handler { return api.handler }
 func (api *API) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", api.health)
+	mux.Handle("GET /app/", webappHandler())
+	mux.Handle("GET /{$}", http.RedirectHandler("/app/", http.StatusFound))
 	mux.Handle("GET /v1/me", api.authenticate("read", http.HandlerFunc(api.me)))
 	mux.Handle("GET /v1/projects", api.authenticate("read", http.HandlerFunc(api.listProjects)))
 	mux.Handle("POST /v1/projects", api.authenticate("write", http.HandlerFunc(api.createProject)))
@@ -117,6 +124,7 @@ func (api *API) routes() http.Handler {
 	mux.Handle("GET /v1/connections", api.authenticate("read", api.resource(api.connections)))
 	mux.Handle("GET /v1/models", api.authenticate("read", api.resource(api.models)))
 	mux.Handle("GET /v1/pipelines", api.authenticate("read", api.resource(api.pipelines)))
+	api.resourceRoutes(mux)
 	mux.Handle("/", api.authenticate("read", http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		writeAPIError(response, http.StatusNotFound, "not_found", "API route not found")
 	})))
@@ -289,6 +297,7 @@ func (api *API) cancelTask(response http.ResponseWriter, request *http.Request) 
 		writeMappedError(response, err)
 		return
 	}
+	api.previews.StopTask(erkaruntime.TaskID(request.PathValue("id")))
 	writeJSON(response, http.StatusAccepted, map[string]any{"status": "cancelling"})
 }
 
@@ -433,6 +442,8 @@ func (api *API) listApprovals(response http.ResponseWriter, request *http.Reques
 func (api *API) decideApproval(response http.ResponseWriter, request *http.Request) {
 	var input struct {
 		Decision store.ApprovalStatus `json:"decision"`
+		Response string               `json:"response"`
+		Scope    store.ApprovalScope  `json:"scope"`
 	}
 	if err := decodeJSON(response, request, &input); err != nil {
 		writeAPIError(response, http.StatusBadRequest, "invalid_request", err.Error())
@@ -447,12 +458,12 @@ func (api *API) decideApproval(response http.ResponseWriter, request *http.Reque
 	if actor == "" {
 		actor = principal.ID
 	}
-	if err := api.store.DecideApproval(request.Context(), request.PathValue("id"), actor, input.Decision, api.clock().UTC()); err != nil {
-		writeMappedError(response, err)
+	if input.Scope != "" && input.Scope != store.ApprovalScopeOnce && input.Scope != store.ApprovalScopeTask {
+		writeAPIError(response, http.StatusBadRequest, "invalid_scope", "Scope must be once or task")
 		return
 	}
-	approval, err := api.store.LoadApproval(request.Context(), request.PathValue("id"))
-	if err != nil {
+	approval, err := api.service.DecideApproval(request.Context(), store.ApprovalDecision{ID: request.PathValue("id"), Actor: actor, Status: input.Decision, Response: input.Response, Scope: input.Scope, Time: api.clock().UTC()})
+	if err != nil && approval.ID == "" {
 		writeMappedError(response, err)
 		return
 	}
@@ -637,19 +648,24 @@ func eventResponse(event erkaruntime.Event) eventDTO {
 }
 
 type approvalDTO struct {
-	ID          string     `json:"id"`
-	TaskID      string     `json:"taskId"`
-	Kind        string     `json:"kind"`
-	Message     string     `json:"message"`
-	Status      string     `json:"status"`
-	Actor       string     `json:"actor,omitempty"`
-	RequestedAt time.Time  `json:"requestedAt"`
-	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
-	DecidedAt   *time.Time `json:"decidedAt,omitempty"`
+	ID          string          `json:"id"`
+	TaskID      string          `json:"taskId"`
+	Kind        string          `json:"kind"`
+	Message     string          `json:"message"`
+	Status      string          `json:"status"`
+	Actor       string          `json:"actor,omitempty"`
+	RequestedAt time.Time       `json:"requestedAt"`
+	ExpiresAt   *time.Time      `json:"expiresAt,omitempty"`
+	DecidedAt   *time.Time      `json:"decidedAt,omitempty"`
+	Tool        string          `json:"tool,omitempty"`
+	Details     json.RawMessage `json:"details,omitempty"`
+	Options     []string        `json:"options,omitempty"`
+	Response    string          `json:"response,omitempty"`
+	Scope       string          `json:"scope,omitempty"`
 }
 
 func approvalResponse(approval store.Approval) approvalDTO {
-	result := approvalDTO{ID: approval.ID, TaskID: string(approval.TaskID), Kind: approval.Kind, Message: approval.Message, Status: string(approval.Status), Actor: approval.Actor, RequestedAt: approval.RequestedAt}
+	result := approvalDTO{ID: approval.ID, TaskID: string(approval.TaskID), Kind: approval.Kind, Message: approval.Message, Status: string(approval.Status), Actor: approval.Actor, RequestedAt: approval.RequestedAt, Tool: approval.Tool, Details: approval.Details, Options: approval.Options, Response: approval.Response, Scope: string(approval.Scope)}
 	if !approval.ExpiresAt.IsZero() {
 		expires := approval.ExpiresAt
 		result.ExpiresAt = &expires
