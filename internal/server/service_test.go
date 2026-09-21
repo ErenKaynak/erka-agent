@@ -123,7 +123,9 @@ func TestServiceRenewsClaimWhileTaskIsRunning(t *testing.T) {
 		Store:         database,
 		RuntimeStore:  database,
 		OpenSession:   openSession,
-		ClaimDuration: 250 * time.Millisecond,
+		// Long enough that one slow write under the race detector cannot
+		// let the claim lapse, short enough to prove renewal below.
+		ClaimDuration: 2 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +153,7 @@ func TestServiceRenewsClaimWhileTaskIsRunning(t *testing.T) {
 		t.Fatal("model execution did not start")
 	}
 	select {
-	case <-time.After(700 * time.Millisecond):
+	case <-time.After(2500 * time.Millisecond):
 	case err := <-result:
 		close(provider.release)
 		t.Fatalf("worker completed before release: %v", err)
