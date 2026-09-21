@@ -66,18 +66,7 @@ func ResolveFixed(resolved config.Resolved, stage Stage, defaults erkaruntime.Na
 	}
 	route := Route{Stage: stage, RequiredCapabilities: append([]string(nil), configured.RequiredCapabilities...)}
 	for _, reference := range configured.Candidates {
-		connectionName, model, _ := strings.Cut(reference, "/")
-		connection := resolved.Connections[connectionName]
-		backendClass := connection.Class
-		if backendClass == "" {
-			backendClass = config.ConnectionNative
-		}
-		route.Candidates = append(route.Candidates, Candidate{
-			Reference: reference, Connection: connectionName, Model: model,
-			Provider: connection.Provider, BaseURL: connection.BaseURL,
-			BackendClass: backendClass, Command: connection.Command,
-			APIKeyEnv: connection.APIKeyEnv, Metadata: connection.Models[model],
-		})
+		route.Candidates = append(route.Candidates, ResolveCandidate(resolved, reference))
 	}
 	budget, err := resolveBudget(configured.Budget, defaults)
 	if err != nil {
@@ -85,6 +74,22 @@ func ResolveFixed(resolved config.Resolved, stage Stage, defaults erkaruntime.Na
 	}
 	route.Budget = budget
 	return route, nil
+}
+
+// ResolveCandidate expands one validated connection/model reference.
+func ResolveCandidate(resolved config.Resolved, reference string) Candidate {
+	connectionName, model, _ := strings.Cut(reference, "/")
+	connection := resolved.Connections[connectionName]
+	backendClass := connection.Class
+	if backendClass == "" {
+		backendClass = config.ConnectionNative
+	}
+	return Candidate{
+		Reference: reference, Connection: connectionName, Model: model,
+		Provider: connection.Provider, BaseURL: connection.BaseURL,
+		BackendClass: backendClass, Command: connection.Command,
+		APIKeyEnv: connection.APIKeyEnv, Metadata: connection.Models[model],
+	}
 }
 
 func resolveBudget(value config.Budget, defaults erkaruntime.NativeLimits) (Budget, error) {

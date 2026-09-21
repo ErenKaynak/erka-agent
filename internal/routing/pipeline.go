@@ -28,6 +28,9 @@ type PipelineRequest struct {
 	Objective  string
 	InitialRun erkaruntime.Run
 	Resume     bool
+	// Triage is recorded before the first stage of a fresh tiered turn. The
+	// caller has already applied the tier to Config.
+	Triage *Triage
 }
 
 type PipelineResult struct {
@@ -67,8 +70,13 @@ func (engine *PipelineEngine) Run(ctx context.Context, request PipelineRequest) 
 			return PipelineResult{}, err
 		}
 	}
-	stage := StagePlanning
+	stage := FirstStage(engine.Config)
 	initial := &request.InitialRun
+	if request.Triage != nil && !request.Resume {
+		if err := engine.recordTriage(ctx, request.TaskID, request.InitialRun.ID, *request.Triage); err != nil {
+			return PipelineResult{}, err
+		}
+	}
 	var last stageAttempt
 	if request.Resume {
 		stage = Stage(request.InitialRun.Stage)
@@ -123,7 +131,10 @@ var errPipelineComplete = errors.New("pipeline complete")
 func nextStage(pipeline config.Pipeline, current Stage, checkpoint erkaruntime.Checkpoint, repairs int) (Stage, error) {
 	switch current {
 	case StagePlanning:
-		return StageCoding, nil
+		if _, ok := pipeline.Stages[string(StageCoding)]; ok {
+			return StageCoding, nil
+		}
+		return "", errPipelineComplete
 	case StageCoding:
 		if _, ok := pipeline.Stages[string(StageValidation)]; ok {
 			return StageValidation, nil
@@ -232,7 +243,7 @@ func (engine *PipelineEngine) executeStage(ctx context.Context, request Pipeline
 		result, runErr := backend.RunStage(ctx, erkaruntime.StageRequest{TaskID: request.TaskID, RunID: run.ID, Objective: request.Objective, Stage: stage, ContextMaxBytes: contextBytes}, engine.Store)
 		attemptResult := stageAttempt{Run: run, Checkpoint: result.Checkpoint, Status: result.Status}
 		if runErr != nil {
-			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, erkaruntime.ErrUnknownMutatingToolOutcome) {
+			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, erkaruntime.ErrUnknownMutatingToolOutcome) || errors.Is(runErr, erkaruntime.ErrAwaitingUser) {
 				return attemptResult, runErr
 			}
 			if index+1 < len(route.Candidates) && CanFallback(runErr) {
@@ -394,6 +405,20 @@ func (engine *PipelineEngine) commitFailure(ctx context.Context, taskID erkarunt
 		request.RunTransition = &erkaruntime.RunStateTransition{TaskID: taskID, RunID: runID, From: run.Status, To: erkaruntime.RunFailed}
 	}
 	_, err = engine.Store.Commit(ctx, request)
+	return err
+}
+
+func (engine *PipelineEngine) recordTriage(ctx context.Context, taskID erkaruntime.TaskID, runID erkaruntime.RunID, triage Triage) error {
+	snapshot, err := engine.Store.LoadTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	event, err := engine.newEvent(snapshot.LastEventSequence+1, taskID, runID, TriageEvent, fmt.Sprintf("Request triaged as %s (%s)", triage.Tier, triage.Source))
+	if err != nil {
+		return err
+	}
+	event.Data = triageEventData(triage)
+	_, err = engine.Store.Commit(ctx, erkaruntime.CommitRequest{TaskID: taskID, ExpectedItemSequence: snapshot.LastItemSequence, ExpectedEventSequence: snapshot.LastEventSequence, Events: []erkaruntime.Event{event}})
 	return err
 }
 
