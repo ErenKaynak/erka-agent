@@ -108,6 +108,51 @@ overrides the credential environment name. Secrets do not belong in YAML—
 `ERKA_DEEPSEEK_API_KEY` is read by the trusted provider adapter and excluded
 from tool subprocess environments.
 
+### Providers and credential kinds
+
+Every provider has a fixed, code-owned list of credential kinds it may use:
+
+| Provider | Class | Credential kind | Notes |
+| --- | --- | --- | --- |
+| `deepseek` | native | `api_key` | Default key env `ERKA_DEEPSEEK_API_KEY` |
+| `openai` | native | `api_key` | Responses API; key env `OPENAI_API_KEY` |
+| `anthropic` | native | `api_key` | Messages API with prompt caching; key env `ANTHROPIC_API_KEY` |
+| `openai_compatible` | native | `api_key` (optional) | Chat Completions servers such as OpenRouter or Ollama |
+| `codex`, `opencode` | subscription_bridge | `vendor_cli_bridge` | Official CLI, your own login |
+| `claude_code` | subscription_bridge | `vendor_cli_bridge` | Experimental, opt-in (see below) |
+
+A connection may state `credential: api_key` or `credential: vendor_cli_bridge`.
+When omitted it follows `class`. Any combination the provider does not allow is
+rejected at load time and again before a provider or bridge is opened.
+
+```yaml
+connections:
+  claude-api:
+    provider: anthropic            # reads ANTHROPIC_API_KEY
+    models:
+      claude-model-id:
+        input_cost_per_million_microunits: 3000000
+        output_cost_per_million_microunits: 15000000
+        cache_read_cost_per_million_microunits: 300000
+        cache_write_cost_per_million_microunits: 3750000
+        currency: USD
+  openrouter:
+    provider: openai_compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+  ollama:
+    provider: openai_compatible
+    base_url: http://localhost:11434/v1   # no api_key_env: no key is sent
+```
+
+`openai_compatible` requires `base_url` and a model ID, and accepts plain HTTP
+only for loopback addresses. The Anthropic provider orders requests as tools,
+system prompt, then messages, and marks cache breakpoints on the last tool, the
+system prompt, and the latest message, so each tool-loop iteration reuses the
+previous prefix. Every model response records a `model.usage` event with input,
+output, cache-read and cache-write tokens. When cache prices are configured,
+cached tokens are billed at those rates; otherwise pricing is unchanged.
+
 ### Fixed multi-model pipelines
 
 M2 can assign different native connections and models to planning, coding,
@@ -231,7 +276,8 @@ erka models
 
 Codex models come from the signed-in CLI's app-server catalog, OpenCode models
 come from `opencode models --pure`, and native DeepSeek/OpenAI models come from
-their authenticated model-list endpoints. Discovery does not run an inference
+their authenticated model-list endpoints (as do Anthropic and
+OpenAI-compatible connections). Discovery does not run an inference
 request. If a live catalog is unavailable, configured models remain visible and
 the failing connection is reported as a warning.
 
@@ -273,6 +319,35 @@ pipelines:
       coding:
         candidates: [coder/deepseek-v4-flash]
 ```
+
+#### Experimental Claude Code bridge
+
+The `claude_code` bridge is off unless a connection opts in explicitly:
+
+```yaml
+connections:
+  claude:
+    class: subscription_bridge
+    provider: claude_code
+    experimental: true
+    models:
+      default: {}
+```
+
+Sign in with the official CLI (`erka auth login claude` runs `claude auth
+login`). erka never reads, copies, or forwards Claude credentials: the CLI
+receives only `CLAUDE_CONFIG_DIR` and CA-certificate variables, and
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_CODE_OAUTH_TOKEN` are
+always removed. The bridge counts as authenticated only when `claude auth
+status` reports a Claude subscription login, and requires Claude Code 2.1.259
+or newer. It runs `claude -p --output-format stream-json --restricted --tools
+Read,Grep,Glob --json-schema …` with MCP servers disabled and no session
+persistence.
+
+> Experimental: headless (`claude -p`) use may draw from a separate allowance
+> or be billed at API rates, and is subject to Anthropic's current terms.
+> erka shows this notice on login, in `erka providers`, in the TUI provider
+> panel, and as a `bridge.notice` event whenever the bridge runs.
 
 Codex runs non-interactively with its read-only sandbox, ephemeral vendor
 session, JSONL events, and a strict checkpoint output schema. OpenCode runs its
@@ -335,8 +410,10 @@ WireGuard instead of exposing it to the public internet.
 
 ## Runtime model
 
-Native DeepSeek and OpenAI API connections use the `erka` tool loop end to end.
-OpenAI uses the Responses streaming API; DeepSeek uses its streaming chat API.
+Native DeepSeek, OpenAI, Anthropic, and OpenAI-compatible connections use the
+`erka` tool loop end to end. OpenAI uses the Responses streaming API, Anthropic
+the Messages streaming API, and DeepSeek and OpenAI-compatible servers the
+streaming Chat Completions API.
 Subscription integrations are explicit compatibility bridges and are never
 represented as native model APIs. Local commands use the same application and
 runtime core as optional server mode, but do not require a daemon or hidden HTTP
