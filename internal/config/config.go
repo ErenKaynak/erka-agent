@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/ErenKaynak/erka-agent/internal/permissions"
 )
 
 const CurrentVersion = 1
@@ -67,9 +69,14 @@ type Resolved struct {
 	MaxOutputTokens    int64
 	StageTimeout       time.Duration
 	AllowFullExecution bool
-	ActivePipeline     string
-	Connections        map[string]Connection
-	Pipelines          map[string]Pipeline
+	// PermissionRules are allow/ask/deny patterns for tool calls.
+	PermissionRules permissions.Rules
+	// AutoApprovePermissions answers every "ask" verdict with allow. It is
+	// set only by `erka run --yes` and never read from configuration.
+	AutoApprovePermissions bool
+	ActivePipeline         string
+	Connections            map[string]Connection
+	Pipelines              map[string]Pipeline
 }
 
 // Connection names either a native provider endpoint or an explicitly labeled
@@ -163,6 +170,11 @@ type fileConfig struct {
 	} `yaml:"runtime,omitempty"`
 	Permissions struct {
 		AllowFullExecution bool `yaml:"allow_full_execution,omitempty"`
+		Rules              struct {
+			Allow []string `yaml:"allow,omitempty"`
+			Ask   []string `yaml:"ask,omitempty"`
+			Deny  []string `yaml:"deny,omitempty"`
+		} `yaml:"rules,omitempty"`
 	} `yaml:"permissions,omitempty"`
 }
 
@@ -246,6 +258,7 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 			}
 		}
 		resolved.AllowFullExecution = loaded.Permissions.AllowFullExecution
+		resolved.PermissionRules = permissions.Rules{Allow: loaded.Permissions.Rules.Allow, Ask: loaded.Permissions.Rules.Ask, Deny: loaded.Permissions.Rules.Deny}
 		resolved.ActivePipeline = loaded.Pipeline
 		resolved.Connections = loaded.Connections
 		resolved.Pipelines = loaded.Pipelines
@@ -354,6 +367,9 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 	}
 	if resolved.MaxIterations <= 0 || resolved.MaxOutputTokens <= 0 || resolved.StageTimeout <= 0 {
 		return Resolved{}, errors.New("runtime limits must be positive")
+	}
+	if err := resolved.PermissionRules.Validate(); err != nil {
+		return Resolved{}, err
 	}
 	if err := validateRouting(&resolved); err != nil {
 		return Resolved{}, err

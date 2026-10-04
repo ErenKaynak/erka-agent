@@ -195,6 +195,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 		if limits.project != "" {
 			return fmt.Errorf("%w: --project requires --profile", ErrUsage)
 		}
+		resolved.AutoApprovePermissions = limits.autoApprove
 		return runTask(ctx, resolved, prompt, resume, workingDirectory, output)
 	}))
 
@@ -225,6 +226,7 @@ type runLimits struct {
 	stageTimeout       time.Duration
 	allowFullExecution bool
 	project            string
+	autoApprove        bool
 }
 
 func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimits, io.Writer) error) *cobra.Command {
@@ -259,6 +261,7 @@ func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimi
 	command.Flags().DurationVar(&limits.stageTimeout, "stage-timeout", 0, "overall stage timeout (ERKA_STAGE_TIMEOUT)")
 	command.Flags().DurationVar(&limits.stageTimeout, "timeout", 0, "overall stage timeout (alias for --stage-timeout)")
 	command.Flags().StringVar(&limits.project, "project", "", "remote server project ID")
+	command.Flags().BoolVar(&limits.autoApprove, "yes", false, "approve tool calls that permission rules mark as \"ask\"")
 	return command
 }
 
@@ -273,7 +276,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 				return fmt.Errorf("get working directory: %w", err)
 			}
 		}
-		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved)})
+		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved), PermissionRules: resolved.PermissionRules, PermissionMode: headlessPermissionMode(resolved)})
 		return err
 	}
 	providerName, baseURL := resolved.Provider, resolved.BaseURL
@@ -305,8 +308,17 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 		Objective: objective, ResumeTaskID: resume, Provider: provider, NativeModel: resolved.Model, Output: output,
 		AllowFullExecution: resolved.AllowFullExecution,
 		Limits:             nativeLimits(resolved),
+		PermissionRules:    resolved.PermissionRules,
+		PermissionMode:     headlessPermissionMode(resolved),
 	})
 	return err
+}
+
+func headlessPermissionMode(resolved config.Resolved) app.PermissionMode {
+	if resolved.AutoApprovePermissions {
+		return app.PermissionModeAutoApprove
+	}
+	return app.PermissionModeDeny
 }
 
 func launchConfigured(ctx context.Context, resolved config.Resolved, options tuiLaunchOptions, input io.Reader, output io.Writer) error {
@@ -330,7 +342,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 			default:
 			}
 		})
-		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full})
+		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, PermissionRules: resolved.PermissionRules, PermissionMode: app.PermissionModeInteractive})
 		if err != nil {
 			return err
 		}
@@ -373,7 +385,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 		default:
 		}
 	})
-	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider})
+	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider, PermissionRules: resolved.PermissionRules, PermissionMode: app.PermissionModeInteractive})
 	if err != nil {
 		return err
 	}

@@ -706,6 +706,8 @@ func marshalItemPayload(item erkaruntime.RuntimeItem) ([]byte, error) {
 		return json.Marshal(item.Checkpoint)
 	case erkaruntime.ItemError:
 		return json.Marshal(item.Error)
+	case erkaruntime.ItemPermission:
+		return json.Marshal(item.Permission)
 	default:
 		return nil, fmt.Errorf("unknown runtime item kind %q", item.Kind)
 	}
@@ -734,6 +736,9 @@ func unmarshalItemPayload(item *erkaruntime.RuntimeItem, payload []byte) error {
 	case erkaruntime.ItemError:
 		item.Error = &erkaruntime.RuntimeError{}
 		return json.Unmarshal(payload, item.Error)
+	case erkaruntime.ItemPermission:
+		item.Permission = &erkaruntime.PermissionRecord{}
+		return json.Unmarshal(payload, item.Permission)
 	default:
 		return fmt.Errorf("unknown runtime item kind %q", item.Kind)
 	}

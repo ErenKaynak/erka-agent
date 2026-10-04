@@ -32,6 +32,7 @@ type Controller interface {
 	Cancel()
 	SetFullExecution(bool)
 	SetModel(erkaruntime.ModelSelection) error
+	DecidePermission(erkaruntime.ToolCallID, bool) error
 }
 
 type Options struct {
@@ -96,6 +97,7 @@ type Model struct {
 	pickerIndex                      int
 	diff                             string
 	unknown                          erkaruntime.ToolCall
+	permission                       erkaruntime.LiveUpdate
 	providers                        ProviderStatusFunc
 	providerList                     []ProviderInfo
 	models                           ModelCatalogFunc
@@ -284,6 +286,13 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.status = "tool: " + Sanitize(update.Tool)
 		case erkaruntime.LiveToolFinished:
 			model.status = "working"
+		case app.LivePermissionRequested:
+			// Requests are re-sent until decided; show each call only once.
+			if model.overlay != "approve" || model.permission.CallID != update.CallID {
+				model.permission = update
+				model.overlay = "approve"
+			}
+			model.status = "approval needed: " + Sanitize(update.Tool)
 		}
 		model.refresh()
 		return model, model.waitLive()
@@ -677,6 +686,22 @@ func (model *Model) handleOverlay(key string) (tea.Model, tea.Cmd) {
 		if key == "n" || key == "esc" {
 			model.overlay = ""
 		}
+	case "approve":
+		if key == "y" || key == "n" || key == "esc" {
+			callID, allowed := model.permission.CallID, key == "y"
+			model.overlay = ""
+			model.permission = erkaruntime.LiveUpdate{}
+			model.status = "working"
+			if !allowed {
+				model.status = "tool call rejected"
+			}
+			return model, func() tea.Msg {
+				if err := model.controller.DecidePermission(callID, allowed); err != nil {
+					return diffMsg{err: err}
+				}
+				return nil
+			}
+		}
 	case "recovery":
 		if key == "s" {
 			return model, model.resolve(true)
@@ -770,6 +795,9 @@ func (model *Model) render() string {
 	}
 	if model.overlay == "cancel" {
 		return overlay(model.width, model.height, "Cancel active turn?", "The active process will stop; queued prompts remain durable. [y/N]")
+	}
+	if model.overlay == "approve" {
+		return overlay(model.width, model.height, "Approve tool call?", fmt.Sprintf("%s\n\nA permission rule requires approval for this call.\n[y] allow once  [n] reject", Sanitize(model.permission.Text)))
 	}
 	if model.overlay == "recovery" {
 		return overlay(model.width, model.height, "Interrupted mutation", fmt.Sprintf("%s (%s) may have run before interruption.\n\n[s] record success  [f] record failure  [Esc] leave paused", Sanitize(model.unknown.Tool), Sanitize(string(model.unknown.CallID))))

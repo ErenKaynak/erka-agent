@@ -30,6 +30,8 @@ const (
 	ItemUsage            ItemKind = "usage"
 	ItemCheckpoint       ItemKind = "checkpoint"
 	ItemError            ItemKind = "error"
+	// ItemPermission records a permission decision before a tool runs.
+	ItemPermission ItemKind = "permission"
 )
 
 // RuntimeItem is one ordered, persisted element of a task transcript. Exactly
@@ -48,6 +50,7 @@ type RuntimeItem struct {
 	Usage      *Usage
 	Checkpoint *Checkpoint
 	Error      *RuntimeError
+	Permission *PermissionRecord
 }
 
 type Message struct {
@@ -118,6 +121,7 @@ func (item RuntimeItem) Validate() error {
 		item.Usage != nil,
 		item.Checkpoint != nil,
 		item.Error != nil,
+		item.Permission != nil,
 	} {
 		if present {
 			payloads++
@@ -157,6 +161,13 @@ func (item RuntimeItem) Validate() error {
 	case ItemError:
 		if item.Error == nil || item.Error.Code == "" || item.Error.Message == "" {
 			return errors.New("error item requires a code and message")
+		}
+	case ItemPermission:
+		if item.Permission == nil {
+			return errors.New("permission item requires a permission payload")
+		}
+		if err := item.Permission.Validate(); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("unknown runtime item kind %q", item.Kind)

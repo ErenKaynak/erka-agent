@@ -617,6 +617,8 @@ func itemResponse(item erkaruntime.RuntimeItem) itemDTO {
 		payload = item.Checkpoint
 	case erkaruntime.ItemError:
 		payload = map[string]any{"code": item.Error.Code, "message": item.Error.Message, "retryable": item.Error.Retryable}
+	case erkaruntime.ItemPermission:
+		payload = item.Permission
 	}
 	return itemDTO{ID: string(item.ID), Sequence: item.Sequence, TaskID: string(item.TaskID), RunID: string(item.RunID), Kind: string(item.Kind), Time: item.Time, Payload: payload}
 }

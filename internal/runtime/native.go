@@ -82,9 +82,14 @@ type NativeBackend struct {
 	// ProjectInstructions (for example rendered AGENTS.md files) are appended
 	// after the stage instructions so the stable prefix stays cacheable.
 	ProjectInstructions string
-	Limits              NativeLimits
-	IDs                 IDGenerator
-	Clock               func() time.Time
+	// Permissions evaluates every tool call before it runs. Nil allows all
+	// exposed tools, which is erka's behavior without permission rules.
+	Permissions PermissionPolicy
+	// Approver decides "ask" verdicts. Nil denies them.
+	Approver PermissionApprover
+	Limits   NativeLimits
+	IDs      IDGenerator
+	Clock    func() time.Time
 }
 
 func (*NativeBackend) BackendClass() string { return BackendNative }
@@ -198,16 +203,30 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 
 		for _, call := range calls {
 			prepared.observe(ctx, LiveUpdate{TaskID: request.TaskID, RunID: request.RunID, Kind: LiveToolStarted, Tool: call.Tool, CallID: call.CallID})
-			if call.Mutating {
-				mutated = true
-				appender.mutated = true
-			}
-			result, executeErr := prepared.executeTool(ctx, call, toolOutputBytes)
-			if executeErr != nil {
-				if errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded) {
-					return StageResult{}, executeErr
+			allowed, denial, recorded, authErr := prepared.authorize(ctx, appender, request, call, history)
+			if authErr != nil {
+				if errors.Is(authErr, context.Canceled) || errors.Is(authErr, context.DeadlineExceeded) {
+					return StageResult{}, authErr
 				}
-				result = ToolExecutionResult{Output: executeErr.Error(), IsError: true}
+				return StageResult{}, prepared.fail(ctx, appender, "permission_check_failed", authErr)
+			}
+			history = append(history, recorded...)
+			var result ToolExecutionResult
+			if !allowed {
+				result = ToolExecutionResult{Output: denial, IsError: true}
+			} else {
+				if call.Mutating {
+					mutated = true
+					appender.mutated = true
+				}
+				var executeErr error
+				result, executeErr = prepared.executeTool(ctx, call, toolOutputBytes)
+				if executeErr != nil {
+					if errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded) {
+						return StageResult{}, executeErr
+					}
+					result = ToolExecutionResult{Output: executeErr.Error(), IsError: true}
+				}
 			}
 			result, consumed := boundToolResult(result, prepared.Limits.MaxCumulativeToolOutputBytes-toolOutputBytes)
 			toolOutputBytes += consumed
@@ -533,6 +552,86 @@ func (backend *preparedBackend) executeTool(ctx context.Context, call ToolCall, 
 	return result, nil
 }
 
+// authorize applies the permission policy to one call. A decision already
+// recorded for the call is replayed, so resume never asks twice. Deny and
+// ask outcomes are committed as permission items before the tool runs.
+func (backend *preparedBackend) authorize(ctx context.Context, appender *durableAppender, request StageRequest, call ToolCall, history []RuntimeItem) (bool, string, []RuntimeItem, error) {
+	if record := recordedPermission(history, call.CallID); record != nil {
+		return record.Action == PermissionAllow, denialMessage(*record), nil, nil
+	}
+	if backend.Permissions == nil {
+		return true, "", nil, nil
+	}
+	decision := backend.Permissions.Decide(call.Tool, call.Arguments)
+	record := PermissionRecord{CallID: call.CallID, Tool: call.Tool, Rule: decision.Rule, Reason: decision.Reason}
+	switch decision.Action {
+	case PermissionAllow:
+		return true, "", nil, nil
+	case PermissionDeny:
+		record.Action, record.DecidedBy = PermissionDeny, "rule"
+	case PermissionAsk:
+		if backend.Approver == nil {
+			record.Action, record.DecidedBy = PermissionDeny, "policy"
+			record.Reason = strings.TrimSpace(record.Reason + "; approval is required but no approver is available (run interactively, or pass --yes to `erka run`)")
+			break
+		}
+		if _, err := appender.append(ctx, nil, []pendingEvent{{
+			Type: "permission.requested", Message: fmt.Sprintf("%s needs approval", call.Tool),
+			Data: eventData(map[string]any{"tool": call.Tool, "call_id": call.CallID, "rule": decision.Rule, "reason": decision.Reason}),
+		}}); err != nil {
+			return false, "", nil, err
+		}
+		approved, err := backend.Approver.RequestPermission(ctx, PermissionRequest{
+			TaskID: request.TaskID, RunID: request.RunID, CallID: call.CallID, Tool: call.Tool,
+			Arguments: append(json.RawMessage(nil), call.Arguments...), Rule: decision.Rule, Reason: decision.Reason,
+		})
+		if err != nil {
+			return false, "", nil, err
+		}
+		record.Action, record.DecidedBy = PermissionDeny, "user"
+		if approved {
+			record.Action = PermissionAllow
+		}
+	default:
+		return false, "", nil, fmt.Errorf("permission policy returned unsupported action %q", decision.Action)
+	}
+	committed, err := appender.append(ctx, []RuntimeItem{{Kind: ItemPermission, Permission: &record}}, []pendingEvent{{
+		Type: "permission.decided", Message: fmt.Sprintf("%s %s by %s", call.Tool, record.Action, record.DecidedBy),
+		Data: eventData(map[string]any{"tool": call.Tool, "call_id": call.CallID, "action": record.Action, "decided_by": record.DecidedBy, "rule": record.Rule}),
+	}})
+	if err != nil {
+		return false, "", nil, err
+	}
+	return record.Action == PermissionAllow, denialMessage(record), committed, nil
+}
+
+func recordedPermission(history []RuntimeItem, callID ToolCallID) *PermissionRecord {
+	for index := len(history) - 1; index >= 0; index-- {
+		if item := history[index]; item.Kind == ItemPermission && item.Permission != nil && item.Permission.CallID == callID {
+			record := *item.Permission
+			return &record
+		}
+	}
+	return nil
+}
+
+func denialMessage(record PermissionRecord) string {
+	if record.Action == PermissionAllow {
+		return ""
+	}
+	message := "Permission denied for " + record.Tool
+	switch record.DecidedBy {
+	case "user":
+		message += ": the user rejected this call"
+	case "rule":
+		message += fmt.Sprintf(" by rule %q", record.Rule)
+	}
+	if reason := strings.TrimSpace(record.Reason); reason != "" {
+		message += " (" + reason + ")"
+	}
+	return message + ". Do not retry the same call; choose another approach or explain what is blocked."
+}
+
 func (backend *preparedBackend) recoverPending(ctx context.Context, appender *durableAppender, history []RuntimeItem, consumed int64) ([]RuntimeItem, int64, error) {
 	pending := make(map[ToolCallID]ToolCall)
 	order := make([]ToolCallID, 0)
@@ -556,6 +655,19 @@ func (backend *preparedBackend) recoverPending(ctx context.Context, appender *du
 		if tool != nil {
 			mutating = tool.Definition().Mutating
 		}
+		if record := recordedPermission(history, call.CallID); record != nil && record.Action == PermissionDeny {
+			// A denied call never ran, so its outcome is known even after a crash.
+			item := RuntimeItem{Kind: ItemToolResult, ToolResult: &ToolResult{CallID: call.CallID, Output: denialMessage(*record), IsError: true}}
+			committed, err := appender.append(ctx, []RuntimeItem{item}, []pendingEvent{{
+				Type: "tool.failed", Message: fmt.Sprintf("%s denied by permission policy", call.Tool),
+				Data: eventData(map[string]any{"tool": call.Tool, "call_id": call.CallID}),
+			}})
+			if err != nil {
+				return history, consumed, err
+			}
+			history = append(history, committed...)
+			continue
+		}
 		if mutating {
 			event := pendingEvent{
 				Type: "task.waiting", Message: "A mutating tool outcome requires inspection",
@@ -566,12 +678,23 @@ func (backend *preparedBackend) recoverPending(ctx context.Context, appender *du
 			}
 			return history, consumed, fmt.Errorf("%w: %s (%s)", ErrUnknownMutatingToolOutcome, call.Tool, call.CallID)
 		}
-		result, executeErr := backend.executeTool(ctx, call, consumed)
-		if executeErr != nil {
-			if errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded) {
-				return history, consumed, executeErr
+		allowed, denial, recorded, authErr := backend.authorize(ctx, appender, StageRequest{TaskID: appender.taskID, RunID: appender.runID}, call, history)
+		if authErr != nil {
+			return history, consumed, authErr
+		}
+		history = append(history, recorded...)
+		var result ToolExecutionResult
+		if allowed {
+			var executeErr error
+			result, executeErr = backend.executeTool(ctx, call, consumed)
+			if executeErr != nil {
+				if errors.Is(executeErr, context.Canceled) || errors.Is(executeErr, context.DeadlineExceeded) {
+					return history, consumed, executeErr
+				}
+				result = ToolExecutionResult{Output: executeErr.Error(), IsError: true}
 			}
-			result = ToolExecutionResult{Output: executeErr.Error(), IsError: true}
+		} else {
+			result = ToolExecutionResult{Output: denial, IsError: true}
 		}
 		result, used := boundToolResult(result, backend.Limits.MaxCumulativeToolOutputBytes-consumed)
 		consumed += used

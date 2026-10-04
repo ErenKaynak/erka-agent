@@ -583,3 +583,109 @@ func TestNativeBackendAppendsProjectInstructionsAfterStageInstructions(t *testin
 		t.Fatalf("instructions = %q", requests[0].Instructions)
 	}
 }
+
+type policyFunc func(string, json.RawMessage) erkaruntime.PermissionDecision
+
+func (function policyFunc) Decide(tool string, arguments json.RawMessage) erkaruntime.PermissionDecision {
+	return function(tool, arguments)
+}
+
+func permissionScript(tool string) *scriptedProvider {
+	return &scriptedProvider{responses: [][]erkaruntime.ModelOutput{
+		{toolDelta("call-1", tool, `{}`), {Kind: erkaruntime.ModelCompleted}},
+		{{Kind: erkaruntime.ModelTextDelta, Text: "Finished."}, {Kind: erkaruntime.ModelCompleted}},
+	}}
+}
+
+func TestNativeBackendPermissionGate(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		decision   erkaruntime.PermissionAction
+		approver   erkaruntime.PermissionApprover
+		wantCalls  int
+		wantRecord erkaruntime.PermissionAction
+		decidedBy  string
+		wantOutput string
+	}{
+		{name: "allow runs without a record", decision: erkaruntime.PermissionAllow, wantCalls: 1},
+		{name: "deny never runs", decision: erkaruntime.PermissionDeny, wantRecord: erkaruntime.PermissionDeny, decidedBy: "rule", wantOutput: `by rule "fixture-rule"`},
+		{name: "ask without approver is denied", decision: erkaruntime.PermissionAsk, wantRecord: erkaruntime.PermissionDeny, decidedBy: "policy", wantOutput: "--yes"},
+		{name: "ask approved by user", decision: erkaruntime.PermissionAsk, approver: erkaruntime.PermissionApproverFunc(func(context.Context, erkaruntime.PermissionRequest) (bool, error) { return true, nil }), wantCalls: 1, wantRecord: erkaruntime.PermissionAllow, decidedBy: "user"},
+		{name: "ask rejected by user", decision: erkaruntime.PermissionAsk, approver: erkaruntime.PermissionApproverFunc(func(context.Context, erkaruntime.PermissionRequest) (bool, error) { return false, nil }), wantRecord: erkaruntime.PermissionDeny, decidedBy: "user", wantOutput: "rejected"},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			memory, request, now := seededRuntime(t)
+			tool := &fakeTool{name: "edit_file", mutating: true, output: "edited"}
+			backend := testBackend(permissionScript("edit_file"), &recordingSink{}, now, tool)
+			backend.Permissions = policyFunc(func(string, json.RawMessage) erkaruntime.PermissionDecision {
+				return erkaruntime.PermissionDecision{Action: testCase.decision, Rule: "fixture-rule", Reason: "fixture"}
+			})
+			backend.Approver = testCase.approver
+			if _, err := backend.RunStage(context.Background(), request, memory); err != nil {
+				t.Fatal(err)
+			}
+			if tool.calls != testCase.wantCalls {
+				t.Fatalf("tool calls = %d, want %d", tool.calls, testCase.wantCalls)
+			}
+			items, _ := memory.LoadItems(context.Background(), request.TaskID, 0)
+			var record *erkaruntime.PermissionRecord
+			var result *erkaruntime.ToolResult
+			for _, item := range items {
+				if item.Kind == erkaruntime.ItemPermission {
+					record = item.Permission
+				}
+				if item.Kind == erkaruntime.ItemToolResult {
+					result = item.ToolResult
+				}
+			}
+			if testCase.wantRecord == "" {
+				if record != nil {
+					t.Fatalf("unexpected permission record %#v", record)
+				}
+			} else if record == nil || record.Action != testCase.wantRecord || record.DecidedBy != testCase.decidedBy || record.CallID != "call-1" {
+				t.Fatalf("permission record = %#v", record)
+			}
+			if result == nil || !strings.Contains(result.Output, testCase.wantOutput) {
+				t.Fatalf("tool result = %#v", result)
+			}
+		})
+	}
+}
+
+func TestRecoveredCallReplaysRecordedPermission(t *testing.T) {
+	t.Parallel()
+	memory, request, now := seededRuntime(t)
+	asked := 0
+	approver := erkaruntime.PermissionApproverFunc(func(context.Context, erkaruntime.PermissionRequest) (bool, error) {
+		asked++
+		return true, nil
+	})
+	policy := policyFunc(func(string, json.RawMessage) erkaruntime.PermissionDecision {
+		return erkaruntime.PermissionDecision{Action: erkaruntime.PermissionAsk, Rule: "ask-all"}
+	})
+	// A read-only call with a recorded user approval but no result, as if the
+	// process crashed after the decision.
+	snapshot, _ := memory.LoadTask(context.Background(), request.TaskID)
+	seed := []erkaruntime.RuntimeItem{
+		{ID: "seed-user", Sequence: snapshot.LastItemSequence + 1, TaskID: request.TaskID, RunID: request.RunID, Kind: erkaruntime.ItemUserMessage, Time: now, Message: &erkaruntime.Message{Content: "fix tests"}},
+		{ID: "seed-call", Sequence: snapshot.LastItemSequence + 2, TaskID: request.TaskID, RunID: request.RunID, Kind: erkaruntime.ItemToolCall, Time: now, ToolCall: &erkaruntime.ToolCall{CallID: "call-0", Tool: "read_file", Arguments: json.RawMessage(`{}`)}},
+		{ID: "seed-permission", Sequence: snapshot.LastItemSequence + 3, TaskID: request.TaskID, RunID: request.RunID, Kind: erkaruntime.ItemPermission, Time: now, Permission: &erkaruntime.PermissionRecord{CallID: "call-0", Tool: "read_file", Action: erkaruntime.PermissionAllow, DecidedBy: "user"}},
+	}
+	if _, err := memory.Commit(context.Background(), erkaruntime.CommitRequest{TaskID: request.TaskID, ExpectedItemSequence: snapshot.LastItemSequence, ExpectedEventSequence: snapshot.LastEventSequence, Items: seed}); err != nil {
+		t.Fatal(err)
+	}
+	tool := &fakeTool{name: "read_file", output: "contents"}
+	provider := &scriptedProvider{responses: [][]erkaruntime.ModelOutput{{{Kind: erkaruntime.ModelTextDelta, Text: "Done."}, {Kind: erkaruntime.ModelCompleted}}}}
+	backend := testBackend(provider, &recordingSink{}, now, tool)
+	backend.Permissions, backend.Approver = policy, approver
+	if _, err := backend.RunStage(context.Background(), request, memory); err != nil {
+		t.Fatal(err)
+	}
+	if asked != 0 || tool.calls != 1 {
+		t.Fatalf("asked = %d, tool calls = %d; the recorded decision must be replayed", asked, tool.calls)
+	}
+}

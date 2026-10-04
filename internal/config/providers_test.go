@@ -292,3 +292,24 @@ pipelines:
 		t.Fatalf("coding-stage bridge error = %v", err)
 	}
 }
+
+func TestPermissionRulesLoadAndValidate(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	write := func(rules string) (Resolved, error) {
+		if err := os.WriteFile(path, []byte("version: 1\npermissions:\n  rules:\n"+rules), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(context.Background(), Options{ConfigPath: path, GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil)})
+	}
+	got, err := write("    allow: [\"run_command(go test *)\"]\n    ask: [apply_patch]\n    deny: [\"run_command(rm -rf *)\"]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.PermissionRules.Allow) != 1 || got.PermissionRules.Ask[0] != "apply_patch" || got.PermissionRules.Deny[0] != "run_command(rm -rf *)" {
+		t.Fatalf("rules = %#v", got.PermissionRules)
+	}
+	if _, err := write("    deny: [\"run_command(\"]\n"); err == nil || !strings.Contains(err.Error(), "permissions.rules.deny") {
+		t.Fatalf("invalid rule error = %v", err)
+	}
+}

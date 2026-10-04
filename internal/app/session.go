@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ErenKaynak/erka-agent/internal/config"
+	"github.com/ErenKaynak/erka-agent/internal/permissions"
 	"github.com/ErenKaynak/erka-agent/internal/projectdocs"
 	"github.com/ErenKaynak/erka-agent/internal/routing"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
@@ -36,6 +37,11 @@ type SessionOptions struct {
 	BridgeFactory      BridgeFactory
 	RebuildProvider    func(string) (erkaruntime.ModelProvider, error)
 	NativeModel        string
+	// PermissionRules are the configured allow/ask/deny tool rules.
+	PermissionRules permissions.Rules
+	// Approver answers "ask" verdicts; when nil, PermissionMode decides.
+	Approver       erkaruntime.PermissionApprover
+	PermissionMode PermissionMode
 }
 
 type ProviderFactory func(context.Context, routing.Candidate) (erkaruntime.ModelProvider, error)
@@ -54,6 +60,7 @@ type Session struct {
 	cancel         context.CancelFunc
 	turnActive     bool
 	modelOverrides map[erkaruntime.Stage]string
+	interactive    *interactiveApprover
 }
 
 type Conversation struct {
@@ -111,7 +118,11 @@ func OpenSession(ctx context.Context, options SessionOptions) (*Session, error) 
 		_ = database.Close()
 		return nil, err
 	}
-	return &Session{options: options, root: root, project: project, database: database, sandbox: localSandbox, holder: holder, readOnly: !acquired}, nil
+	if _, err := permissions.New(options.PermissionRules, options.AllowFullExecution); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	return &Session{options: options, root: root, project: project, database: database, sandbox: localSandbox, holder: holder, readOnly: !acquired, interactive: &interactiveApprover{observer: options.Observer}}, nil
 }
 
 func (session *Session) Root() string                     { return session.root }
@@ -319,9 +330,13 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 	// AGENTS.md is read fresh for every turn so edits take effect on the next
 	// prompt. A missing or unreadable file simply contributes nothing.
 	projectInstructions, _ := projectdocs.Load(runCtx, session.sandbox)
+	policy, toolOptions, err := session.permissionPolicy(allowFullExecution)
+	if err != nil {
+		return LocalResult{}, false, err
+	}
+	approver := session.approver()
 	stage := erkaruntime.StageResult{}
 	activeRunID := run.ID
-	var err error
 	if session.options.Pipeline.ActivePipeline != "" {
 		engine := &routing.PipelineEngine{Config: session.effectivePipeline(), Store: session.database, IDs: session.options.IDs, Clock: session.options.Clock, Limits: session.options.Limits}
 		engine.Factory = func(factoryCtx context.Context, candidate routing.Candidate, stageName routing.Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
@@ -336,14 +351,14 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 			if openErr != nil {
 				return nil, openErr
 			}
-			availableTools := stageTools(tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), stageName)
-			return &erkaruntime.NativeBackend{Provider: provider, Tools: availableTools, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
+			availableTools := stageTools(tools.Builtins(session.sandbox, toolOptions), stageName)
+			return &erkaruntime.NativeBackend{Provider: provider, Tools: availableTools, Permissions: policy, Approver: approver, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
 		}
 		pipelineResult, pipelineErr := engine.Run(runCtx, routing.PipelineRequest{TaskID: turn.TaskID, Objective: turn.Prompt, InitialRun: run, Resume: resumePipeline})
 		activeRunID, err = pipelineResult.RunID, pipelineErr
 		stage = erkaruntime.StageResult{Checkpoint: pipelineResult.Checkpoint, Status: pipelineResult.Status}
 	} else {
-		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
+		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, toolOptions), Permissions: policy, Approver: approver, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
 		stage, err = backend.RunStage(runCtx, erkaruntime.StageRequest{TaskID: turn.TaskID, RunID: run.ID, Objective: turn.Prompt}, session.database)
 	}
 	if activeRunID == "" {
@@ -402,6 +417,23 @@ func checkpointSummary(checkpoint erkaruntime.Checkpoint) string {
 	default:
 		return checkpoint.ApprovedPlan
 	}
+}
+
+// permissionPolicy builds the tool policy for one turn. Without configured
+// rules it returns a nil policy, which keeps erka's original behavior: every
+// exposed tool may run and run_command exists only with --full. An allow or
+// ask rule for run_command exposes it without --full, restricted by policy.
+func (session *Session) permissionPolicy(allowFullExecution bool) (erkaruntime.PermissionPolicy, tools.Options, error) {
+	options := tools.Options{AllowFullExecution: allowFullExecution}
+	if session.options.PermissionRules.Empty() {
+		return nil, options, nil
+	}
+	policy, err := permissions.New(session.options.PermissionRules, allowFullExecution)
+	if err != nil {
+		return nil, options, err
+	}
+	options.AllowFullExecution = allowFullExecution || policy.ExposesCommand()
+	return policy, options, nil
 }
 
 func stageTools(all []erkaruntime.Tool, stage routing.Stage) []erkaruntime.Tool {

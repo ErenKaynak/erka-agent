@@ -194,7 +194,7 @@ func serveConfigured(ctx context.Context, resolved config.Resolved, options serv
 	}
 	defer database.Close()
 	manager := newAuthManager()
-	openSession := configuredServerSessionFactory(resolved, manager)
+	openSession := configuredServerSessionFactory(resolved, manager, erkaserver.NewPermissionApprover(database, erkaserver.PermissionApproverOptions{}))
 	service, err := erkaserver.NewService(erkaserver.ServiceOptions{
 		StateDir: resolved.StateDir, Store: database, RuntimeStore: database,
 		OpenSession: openSession, WorkerPoll: options.poll, ClaimDuration: options.claim,
@@ -275,12 +275,13 @@ func validateServerListen(options serveOptions) error {
 	return nil
 }
 
-func configuredServerSessionFactory(resolved config.Resolved, manager *auth.Manager) erkaserver.SessionFactory {
+func configuredServerSessionFactory(resolved config.Resolved, manager *auth.Manager, approver erkaruntime.PermissionApprover) erkaserver.SessionFactory {
 	return func(ctx context.Context, root string) (erkaserver.TaskSession, error) {
 		options := app.SessionOptions{
 			WorkingDirectory: root, StateDir: resolved.StateDir, Pipeline: resolved,
 			ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(),
 			Limits: nativeLimits(resolved), AllowFullExecution: resolved.AllowFullExecution,
+			PermissionRules: resolved.PermissionRules, Approver: approver,
 		}
 		if resolved.ActivePipeline == "" {
 			key, _, err := resolveNativeKey(ctx, manager, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)

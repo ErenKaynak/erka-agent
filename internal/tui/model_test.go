@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -20,6 +21,7 @@ type fakeController struct {
 	full          bool
 	cancelled     int
 	model         erkaruntime.ModelSelection
+	decisions     []string
 }
 
 func (*fakeController) Root() string   { return "/repo" }
@@ -47,8 +49,12 @@ func (*fakeController) UnknownOutcome(context.Context, erkaruntime.TaskID) (erka
 	return erkaruntime.ToolCall{}, false, nil
 }
 func (*fakeController) ResolveUnknown(context.Context, erkaruntime.TaskID, bool) error { return nil }
-func (controller *fakeController) Cancel()                                             { controller.cancelled++ }
-func (controller *fakeController) SetFullExecution(value bool)                         { controller.full = value }
+func (controller *fakeController) DecidePermission(callID erkaruntime.ToolCallID, allowed bool) error {
+	controller.decisions = append(controller.decisions, fmt.Sprintf("%s=%t", callID, allowed))
+	return nil
+}
+func (controller *fakeController) Cancel()                     { controller.cancelled++ }
+func (controller *fakeController) SetFullExecution(value bool) { controller.full = value }
 func (controller *fakeController) SetModel(value erkaruntime.ModelSelection) error {
 	controller.model = value
 	return nil
@@ -444,5 +450,27 @@ func key(value string) tea.KeyPressMsg {
 			return tea.KeyPressMsg{Code: runes[0], Text: value}
 		}
 		return tea.KeyPressMsg{}
+	}
+}
+
+func TestModelAsksForPermissionOncePerCall(t *testing.T) {
+	controller := &fakeController{}
+	model := NewModel(Options{Controller: controller, Provider: "deepseek", Model: "fixture"})
+	request := liveMsg(erkaruntime.LiveUpdate{Kind: app.LivePermissionRequested, Tool: "run_command", CallID: "call-1", Text: `run_command {"command":["go","test","./..."]}`})
+	model.Update(request)
+	if model.overlay != "approve" || !strings.Contains(model.render(), "go") {
+		t.Fatalf("overlay = %q", model.overlay)
+	}
+	model.Update(request) // reminder for the same call must not reset anything
+	_, command := model.Update(key("y"))
+	if command == nil || model.overlay != "" {
+		t.Fatalf("overlay after approval = %q", model.overlay)
+	}
+	command()
+	model.Update(liveMsg(erkaruntime.LiveUpdate{Kind: app.LivePermissionRequested, Tool: "apply_patch", CallID: "call-2", Text: "apply_patch"}))
+	_, command = model.Update(key("n"))
+	command()
+	if strings.Join(controller.decisions, ",") != "call-1=true,call-2=false" {
+		t.Fatalf("decisions = %v", controller.decisions)
 	}
 }

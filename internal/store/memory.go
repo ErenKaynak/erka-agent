@@ -390,6 +390,10 @@ func cloneItem(item erkaruntime.RuntimeItem) erkaruntime.RuntimeItem {
 		value := *item.Error
 		result.Error = &value
 	}
+	if item.Permission != nil {
+		value := *item.Permission
+		result.Permission = &value
+	}
 	return result
 }
 
