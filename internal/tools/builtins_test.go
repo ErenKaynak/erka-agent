@@ -30,11 +30,11 @@ func TestBuiltinDefinitionsAreCompleteAndValid(t *testing.T) {
 			t.Fatalf("%s definition: %v", definition.Name, err)
 		}
 		names = append(names, definition.Name)
-		if (definition.Name == "apply_patch" || definition.Name == "run_command") != definition.Mutating {
+		if (definition.Name == "apply_patch" || definition.Name == "edit_file" || definition.Name == "run_command") != definition.Mutating {
 			t.Fatalf("%s mutating = %v", definition.Name, definition.Mutating)
 		}
 	}
-	want := []string{"read_file", "list_files", "search_text", "apply_patch", "run_command", "git_status", "git_diff"}
+	want := []string{"read_file", "list_files", "search_text", "apply_patch", "edit_file", "run_command", "git_status", "git_diff"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("tool names = %v, want %v", names, want)
 	}
@@ -224,4 +224,48 @@ func mustJSON(t *testing.T, value any) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestEditFileReplacesExactlyOneMatch(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	target := filepath.Join(root, "pkg", "main.go")
+	mustWrite(t, target, "package main\n\nfunc a() {}\nfunc b() {}\nfunc b() {}\n")
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	all := Builtins(mustSandbox(t, root), Options{})
+	edit := func(oldStr, newStr string) erkaruntime.ToolExecutionResult {
+		return invoke(t, all, "edit_file", string(mustJSON(t, map[string]string{"path": "pkg/main.go", "old_str": oldStr, "new_str": newStr})))
+	}
+	result := edit("func a() {}", "func a() { println(1) }")
+	if result.IsError || result.Output != "edited pkg/main.go at line 3" {
+		t.Fatalf("edit = %#v", result)
+	}
+	data, _ := os.ReadFile(target)
+	if string(data) != "package main\n\nfunc a() { println(1) }\nfunc b() {}\nfunc b() {}\n" {
+		t.Fatalf("content = %q", data)
+	}
+	if info, _ := os.Stat(target); info.Mode().Perm() != 0o755 {
+		t.Fatalf("mode changed to %v", info.Mode().Perm())
+	}
+	for _, testCase := range []struct{ oldStr, newStr, want string }{
+		{"func b() {}", "x", "matches 2 times"},
+		{"func c() {}", "x", "was not found"},
+		{"package main", "package main", "identical"},
+	} {
+		if result := edit(testCase.oldStr, testCase.newStr); !result.IsError || !strings.Contains(result.Output, testCase.want) {
+			t.Fatalf("edit(%q) = %#v, want %q", testCase.oldStr, result, testCase.want)
+		}
+	}
+	after, _ := os.ReadFile(target)
+	if string(after) != string(data) {
+		t.Fatal("a failed edit modified the file")
+	}
+	for _, escape := range []string{"../outside.go", "/etc/passwd"} {
+		result := invoke(t, all, "edit_file", string(mustJSON(t, map[string]string{"path": escape, "old_str": "a", "new_str": "b"})))
+		if !result.IsError {
+			t.Fatalf("edit outside the workspace succeeded: %s", escape)
+		}
+	}
 }

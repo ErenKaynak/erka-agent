@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path"
 	"sort"
 	"strconv"
@@ -38,7 +39,7 @@ type Options struct {
 func Builtins(sandbox erkaruntime.Sandbox, options Options) []erkaruntime.Tool {
 	result := []erkaruntime.Tool{
 		&readFileTool{sandbox}, &listFilesTool{sandbox}, &searchTextTool{sandbox},
-		&applyPatchTool{sandbox},
+		&applyPatchTool{sandbox}, &editFileTool{sandbox},
 	}
 	if options.AllowFullExecution {
 		result = append(result, &runCommandTool{sandbox})
@@ -201,6 +202,72 @@ func (tool *applyPatchTool) Execute(ctx context.Context, invocation erkaruntime.
 		return resultFromError(err)
 	}
 	return commandOutput(result), nil
+}
+
+const maxEditFileBytes = int64(4 << 20)
+
+type editFileTool struct{ sandbox erkaruntime.Sandbox }
+
+func (tool *editFileTool) Definition() erkaruntime.ToolDefinition {
+	return definition("edit_file", "Replace one exact occurrence of old_str with new_str in a workspace text file. old_str must match the file byte-for-byte exactly once, including whitespace; include enough surrounding lines to make it unique.",
+		`{"type":"object","additionalProperties":false,"required":["path","old_str","new_str"],"properties":{"path":{"type":"string","minLength":1},"old_str":{"type":"string","minLength":1},"new_str":{"type":"string"}}}`,
+		true, false, defaultOutputLimit)
+}
+
+func (tool *editFileTool) Execute(ctx context.Context, invocation erkaruntime.ToolInvocation) (erkaruntime.ToolExecutionResult, error) {
+	var arguments struct {
+		Path   string `json:"path"`
+		OldStr string `json:"old_str"`
+		NewStr string `json:"new_str"`
+	}
+	if err := decode(invocation.Arguments, &arguments); err != nil {
+		return toolError(err), nil
+	}
+	if err := validateRelative(arguments.Path); err != nil {
+		return toolError(err), nil
+	}
+	if arguments.OldStr == arguments.NewStr {
+		return toolError(errors.New("old_str and new_str are identical")), nil
+	}
+	data, err := tool.sandbox.ReadFile(ctx, arguments.Path, maxEditFileBytes)
+	if err != nil {
+		return resultFromError(err)
+	}
+	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
+		return toolError(errors.New("file is not UTF-8 text")), nil
+	}
+	content := string(data)
+	switch count := strings.Count(content, arguments.OldStr); count {
+	case 1:
+	case 0:
+		return toolError(fmt.Errorf("old_str was not found in %s; read the file and copy the text exactly", arguments.Path)), nil
+	default:
+		return toolError(fmt.Errorf("old_str matches %d times in %s; include more surrounding context so it matches exactly once", count, arguments.Path)), nil
+	}
+	index := strings.Index(content, arguments.OldStr)
+	updated := content[:index] + arguments.NewStr + content[index+len(arguments.OldStr):]
+	if int64(len(updated)) > maxEditFileBytes {
+		return toolError(errors.New("edited file would exceed the size limit")), nil
+	}
+	if err := tool.sandbox.WriteFile(ctx, arguments.Path, []byte(updated), existingMode(ctx, tool.sandbox, arguments.Path)); err != nil {
+		return resultFromError(err)
+	}
+	line := strings.Count(content[:index], "\n") + 1
+	return erkaruntime.ToolExecutionResult{Output: fmt.Sprintf("edited %s at line %d", arguments.Path, line)}, nil
+}
+
+// existingMode keeps a file's permission bits when it is rewritten.
+func existingMode(ctx context.Context, sandbox erkaruntime.Sandbox, name string) fs.FileMode {
+	cleaned := path.Clean(strings.ReplaceAll(name, `\`, "/"))
+	entries, err := sandbox.ListDir(ctx, path.Dir(cleaned), maxEntries)
+	if err == nil {
+		for _, entry := range entries {
+			if path.Clean(entry.Path) == cleaned && entry.Mode.Perm() != 0 {
+				return entry.Mode.Perm()
+			}
+		}
+	}
+	return 0o644
 }
 
 type runCommandTool struct{ sandbox erkaruntime.Sandbox }
@@ -445,6 +512,7 @@ var _ erkaruntime.Tool = (*readFileTool)(nil)
 var _ erkaruntime.Tool = (*listFilesTool)(nil)
 var _ erkaruntime.Tool = (*searchTextTool)(nil)
 var _ erkaruntime.Tool = (*applyPatchTool)(nil)
+var _ erkaruntime.Tool = (*editFileTool)(nil)
 var _ erkaruntime.Tool = (*runCommandTool)(nil)
 var _ erkaruntime.Tool = (*gitStatusTool)(nil)
 var _ erkaruntime.Tool = (*gitDiffTool)(nil)
