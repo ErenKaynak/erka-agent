@@ -173,6 +173,19 @@ its own run, checkpoint, token usage, configured cost, and terminal status in
 SQLite. Model-to-model handoff uses bounded durable checkpoints instead of
 replaying another provider's full transcript.
 
+The validation stage must finish with a single JSON object, optionally inside
+one Markdown code fence:
+
+```json
+{"status": "pass", "failures": [], "notes": "go test ./... passed"}
+```
+
+`status` is `pass` or `fail`, and `pass` requires an empty `failures` list. The
+report is checked against a JSON Schema and stored in the stage checkpoint.
+Any other output counts as a failed validation and goes to repair (or fails the
+task when the repair budget is spent). Checkpoints recorded before structured
+validation keep their original verdict when such a task is resumed.
+
 Optional model pricing uses integer microunits per million tokens:
 
 ```yaml
@@ -267,6 +280,50 @@ JSON stream through a deny-by-default plan profile with project configuration
 disabled. Subscription bridges are rejected for coding, validation, and repair
 stages.
 
+## Server mode
+
+`erka serve` runs the same runtime as a personal HTTP server so tasks keep
+running while you are away and can be controlled from another machine. It is
+optional: nothing else in erka needs a daemon.
+
+```bash
+./erka server token create laptop --scope read,write,approve
+./erka serve --listen 127.0.0.1:7432
+```
+
+- Plain HTTP only binds to loopback addresses. To listen on any other address,
+  pass `--tls-cert` and `--tls-key`. erka refuses to serve as the root OS user.
+- Every endpoint except `GET /v1/health` needs a bearer token. Tokens are
+  scoped to `read`, `write`, `approve`, or `admin`; the secret is printed once
+  and can be revoked with `erka server token revoke <token-id>`.
+- Each remote task runs in its own Git worktree on the server, so concurrent
+  tasks never edit the repository checkout directly.
+- `GET /v1/tasks/{id}/events/stream` is a Server-Sent Events stream of
+  committed task events. Reconnecting with `Last-Event-ID` resumes after the
+  last delivered event.
+- Queued tasks are claimed by a worker with an expiring lease
+  (`--claim-duration`), so a task whose worker stopped can be claimed again.
+
+From another machine, save a profile once. The token is read from an
+environment variable and stored in the operating-system credential store:
+
+```bash
+export ERKA_SERVER_TOKEN='token-from-server'
+./erka profile add home https://erka.example.internal:7432
+./erka --profile home projects add app /srv/repos/app
+./erka --profile home run --project <project-id> "Fix the failing checkout tests"
+./erka --profile home watch <task-id>
+./erka --profile home approvals
+./erka --profile home approve <approval-id>
+```
+
+`show`, `diff`, `cancel`, `retry`, and `reject` work the same way, and `watch
+--after <event>` continues from a known event. Remote `run` does not accept
+`--resume`; use `watch` or `retry` instead.
+
+Prefer reaching the server over a private network such as Tailscale or
+WireGuard instead of exposing it to the public internet.
+
 ## Product promise
 
 - Run without a server on macOS, Linux, or Windows.
@@ -293,7 +350,7 @@ Development proceeds through demonstrable milestones:
 2. A durable local runtime with SQLite, native tools, and DeepSeek streaming.
 3. Stage-specific multi-model routing, budgets, repair, and review.
 4. Optional subscription bridges.
-5. Optional server mode and remote CLI operation.
+5. Optional server mode and remote CLI operation (implemented).
 6. Web client and browser notifications.
 7. Extensibility and public-release packaging.
 
@@ -303,7 +360,7 @@ multi-user SaaS, distributed workers, or automatic deployment.
 
 ## Current status
 
-M0, M1, M1.5, M2, and M3 are implemented. Bare `erka` opens a local keyboard-first
+M0, M1, M1.5, M2, M3, and M4 are implemented. Bare `erka` opens a local keyboard-first
 conversation UI with live model output, durable follow-up queues, conversation
 restore, activity and diff views, session-only permission elevation,
 cancellation, and explicit interrupted-write recovery. `erka run` uses the same
@@ -320,8 +377,12 @@ planning/review stages, canonical checkpoint translation, capability and login
 reporting, and deterministic fallback. Codex device authentication is delegated
 to the official CLI; erka never handles the resulting ChatGPT credentials.
 
-The server/API is planned for M4, and browser access is planned for M5. No web
-UI or background daemon is included today.
+Optional server mode (`erka serve`) provides an authenticated HTTP API with
+scoped bearer tokens, SSE task events with `Last-Event-ID` resume, remote
+approvals, and per-task Git worktrees. Remote profiles let the CLI create,
+watch, approve, cancel, and retry tasks on that server. See
+[Server mode](#server-mode). Browser access is planned for M5; no web UI is
+included today, and erka never starts a background daemon on its own.
 
 ## Security posture
 
