@@ -22,6 +22,7 @@ type fakeController struct {
 	cancelled     int
 	model         erkaruntime.ModelSelection
 	decisions     []string
+	planMode      bool
 }
 
 func (*fakeController) Root() string   { return "/repo" }
@@ -49,6 +50,7 @@ func (*fakeController) UnknownOutcome(context.Context, erkaruntime.TaskID) (erka
 	return erkaruntime.ToolCall{}, false, nil
 }
 func (*fakeController) ResolveUnknown(context.Context, erkaruntime.TaskID, bool) error { return nil }
+func (controller *fakeController) SetPlanMode(enabled bool)                            { controller.planMode = enabled }
 func (controller *fakeController) DecidePermission(callID erkaruntime.ToolCallID, allowed bool) error {
 	controller.decisions = append(controller.decisions, fmt.Sprintf("%s=%t", callID, allowed))
 	return nil
@@ -471,6 +473,45 @@ func TestModelAsksForPermissionOncePerCall(t *testing.T) {
 	_, command = model.Update(key("n"))
 	command()
 	if strings.Join(controller.decisions, ",") != "call-1=true,call-2=false" {
+		t.Fatalf("decisions = %v", controller.decisions)
+	}
+}
+
+func TestModelPlanModeOffersImplementationAfterPlan(t *testing.T) {
+	controller := &fakeController{}
+	model := NewModel(Options{Controller: controller, Provider: "deepseek", Model: "fixture"})
+	model.composer.InsertString("/plan")
+	_, command := model.Update(key("enter"))
+	if command != nil {
+		command()
+	}
+	if !controller.planMode || !model.planMode {
+		t.Fatal("/plan did not enable plan mode")
+	}
+	model.Update(runFinishedMsg{ran: true})
+	if model.overlay != "plan-implement" {
+		t.Fatalf("overlay = %q", model.overlay)
+	}
+	_, command = model.Update(key("y"))
+	if controller.planMode || command == nil {
+		t.Fatal("approving the plan must leave plan mode and submit")
+	}
+	command()
+	if len(controller.prompts) != 1 || !strings.Contains(controller.prompts[0], "approved plan") {
+		t.Fatalf("prompts = %v", controller.prompts)
+	}
+}
+
+func TestPipelineModelShowsPlanApprovalOverlay(t *testing.T) {
+	controller := &fakeController{}
+	model := NewModel(Options{Controller: controller, Pipeline: true})
+	model.Update(liveMsg(erkaruntime.LiveUpdate{Kind: app.LivePlanRequested, CallID: "plan:run-1", Text: "Step 1"}))
+	if model.overlay != "plan" || !strings.Contains(model.render(), "Step 1") {
+		t.Fatalf("overlay = %q", model.overlay)
+	}
+	_, command := model.Update(key("n"))
+	command()
+	if strings.Join(controller.decisions, ",") != "plan:run-1=false" {
 		t.Fatalf("decisions = %v", controller.decisions)
 	}
 }

@@ -55,21 +55,23 @@ type ProviderFactory func(context.Context, routing.Candidate) (erkaruntime.Model
 type BridgeFactory func(context.Context, routing.Candidate) (erkaruntime.SubscriptionBridge, error)
 
 type Session struct {
-	mu             sync.Mutex
-	options        SessionOptions
-	root           string
-	project        erkaruntime.ProjectID
-	database       *store.SQLite
-	sandbox        *sandbox.Local
-	holder         string
-	readOnly       bool
-	closed         bool
-	cancel         context.CancelFunc
-	turnActive     bool
-	modelOverrides map[erkaruntime.Stage]string
-	interactive    *interactiveApprover
-	mcpOnce        sync.Once
-	mcp            *mcp.Manager
+	mu              sync.Mutex
+	options         SessionOptions
+	root            string
+	project         erkaruntime.ProjectID
+	database        *store.SQLite
+	sandbox         *sandbox.Local
+	holder          string
+	readOnly        bool
+	closed          bool
+	cancel          context.CancelFunc
+	turnActive      bool
+	modelOverrides  map[erkaruntime.Stage]string
+	interactive     *interactiveApprover
+	interactivePlan *interactiveApprover
+	planMode        bool
+	mcpOnce         sync.Once
+	mcp             *mcp.Manager
 }
 
 type Conversation struct {
@@ -135,7 +137,7 @@ func OpenSession(ctx context.Context, options SessionOptions) (*Session, error) 
 		_ = database.Close()
 		return nil, err
 	}
-	return &Session{options: options, root: root, project: project, database: database, sandbox: localSandbox, holder: holder, readOnly: !acquired, interactive: &interactiveApprover{observer: options.Observer}}, nil
+	return &Session{options: options, root: root, project: project, database: database, sandbox: localSandbox, holder: holder, readOnly: !acquired, interactive: &interactiveApprover{observer: options.Observer}, interactivePlan: &interactiveApprover{observer: options.Observer, kind: LivePlanRequested}}, nil
 }
 
 func (session *Session) Root() string                     { return session.root }
@@ -338,6 +340,7 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 	session.mu.Lock()
 	session.cancel = cancel
 	allowFullExecution := session.options.AllowFullExecution
+	planMode := session.planMode
 	session.mu.Unlock()
 	leaseDone := make(chan struct{})
 	go session.maintainLease(runCtx, cancel, leaseDone)
@@ -363,6 +366,9 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 	activeRunID := run.ID
 	if session.options.Pipeline.ActivePipeline != "" {
 		engine := &routing.PipelineEngine{Config: session.effectivePipeline(), Store: session.database, IDs: session.options.IDs, Clock: session.options.Clock, Limits: session.options.Limits}
+		if planMode {
+			engine.PlanApprover = session.planApprover()
+		}
 		engine.Factory = func(factoryCtx context.Context, candidate routing.Candidate, stageName routing.Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
 			if candidate.BackendClass == config.ConnectionSubscriptionBridge {
 				bridge, openErr := session.options.BridgeFactory(factoryCtx, candidate)
@@ -382,7 +388,11 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 		activeRunID, err = pipelineResult.RunID, pipelineErr
 		stage = erkaruntime.StageResult{Checkpoint: pipelineResult.Checkpoint, Status: pipelineResult.Status}
 	} else {
-		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: append(tools.Builtins(session.sandbox, toolOptions), extraTools...), Permissions: policy, Approver: approver, Hooks: hookRunner, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
+		available, instructions := append(tools.Builtins(session.sandbox, toolOptions), extraTools...), nativeInstructions
+		if planMode {
+			available, instructions = readOnlyTools(available), planInstructions
+		}
+		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: available, Permissions: policy, Approver: approver, Hooks: hookRunner, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: instructions, ProjectInstructions: projectInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
 		stage, err = backend.RunStage(runCtx, erkaruntime.StageRequest{TaskID: turn.TaskID, RunID: run.ID, Objective: turn.Prompt}, session.database)
 	}
 	if activeRunID == "" {
@@ -492,6 +502,17 @@ func (session *Session) permissionPolicy(allowFullExecution bool) (erkaruntime.P
 	}
 	options.AllowFullExecution = allowFullExecution || policy.ExposesCommand()
 	return policy, options, nil
+}
+
+// readOnlyTools keeps only tools without side effects.
+func readOnlyTools(all []erkaruntime.Tool) []erkaruntime.Tool {
+	result := make([]erkaruntime.Tool, 0, len(all))
+	for _, tool := range all {
+		if !tool.Definition().Mutating {
+			result = append(result, tool)
+		}
+	}
+	return result
 }
 
 func stageTools(all []erkaruntime.Tool, stage routing.Stage) []erkaruntime.Tool {

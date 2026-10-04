@@ -39,6 +39,8 @@ type LocalOptions struct {
 	PermissionMode     PermissionMode
 	Hooks              hooks.Config
 	MCPServers         map[string]mcp.ServerConfig
+	// PlanMode runs the turn in plan mode (see Session.SetPlanMode).
+	PlanMode bool
 }
 
 type LocalResult struct {
@@ -60,6 +62,7 @@ func RunLocal(ctx context.Context, options LocalOptions) (LocalResult, error) {
 		return LocalResult{}, err
 	}
 	defer session.Close()
+	session.SetPlanMode(options.PlanMode)
 	if session.ReadOnly() {
 		return LocalResult{}, errors.New("repository is already being executed by another erka process")
 	}

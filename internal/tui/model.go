@@ -33,6 +33,7 @@ type Controller interface {
 	SetFullExecution(bool)
 	SetModel(erkaruntime.ModelSelection) error
 	DecidePermission(erkaruntime.ToolCallID, bool) error
+	SetPlanMode(bool)
 }
 
 type Options struct {
@@ -43,9 +44,12 @@ type Options struct {
 	Model      string
 	Branch     string
 	Full       bool
-	Live       <-chan erkaruntime.LiveUpdate
-	Providers  ProviderStatusFunc
-	Models     ModelCatalogFunc
+	// Pipeline reports that turns run through a configured pipeline, where
+	// plan approval happens mid-run instead of after the turn.
+	Pipeline  bool
+	Live      <-chan erkaruntime.LiveUpdate
+	Providers ProviderStatusFunc
+	Models    ModelCatalogFunc
 }
 
 // ModelOption is one provider model eligible for one configured stage.
@@ -98,6 +102,7 @@ type Model struct {
 	diff                             string
 	unknown                          erkaruntime.ToolCall
 	permission                       erkaruntime.LiveUpdate
+	planMode, pipeline               bool
 	providers                        ProviderStatusFunc
 	providerList                     []ProviderInfo
 	models                           ModelCatalogFunc
@@ -155,6 +160,7 @@ var slashCommands = []slashCommand{
 	{name: "full", usage: "/full"},
 	{name: "workspace", usage: "/workspace"},
 	{name: "cancel", usage: "/cancel"},
+	{name: "plan", usage: "/plan"},
 	{name: "status", usage: "/status"},
 	{name: "provider", usage: "/provider"},
 	{name: "model", usage: "/model"},
@@ -178,7 +184,7 @@ func NewModel(options Options) *Model {
 	transcript.SoftWrap = true
 	activity := viewport.New()
 	activity.SoftWrap = true
-	return &Model{ctx: ctx, controller: options.Controller, composer: composer, transcript: transcript, activity: activity, taskID: options.TaskID, provider: options.Provider, model: options.Model, branch: options.Branch, full: options.Full, live: options.Live, providers: options.Providers, models: options.Models, modelSelections: make(map[erkaruntime.Stage]string), status: "ready"}
+	return &Model{ctx: ctx, controller: options.Controller, composer: composer, transcript: transcript, activity: activity, taskID: options.TaskID, provider: options.Provider, model: options.Model, branch: options.Branch, full: options.Full, pipeline: options.Pipeline, live: options.Live, providers: options.Providers, models: options.Models, modelSelections: make(map[erkaruntime.Stage]string), status: "ready"}
 }
 
 func (model *Model) Init() tea.Cmd { return tea.Batch(model.load(), model.waitLive()) }
@@ -271,6 +277,10 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.status = "paused"
 		} else {
 			model.status = "ready"
+			if model.planMode && !model.pipeline && message.ran {
+				model.overlay = "plan-implement"
+				model.status = "plan ready"
+			}
 		}
 		return model, model.load()
 	case liveMsg:
@@ -286,6 +296,12 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.status = "tool: " + Sanitize(update.Tool)
 		case erkaruntime.LiveToolFinished:
 			model.status = "working"
+		case app.LivePlanRequested:
+			if model.overlay != "plan" || model.permission.CallID != update.CallID {
+				model.permission = update
+				model.overlay = "plan"
+			}
+			model.status = "plan approval needed"
 		case app.LivePermissionRequested:
 			// Requests are re-sent until decided; show each call only once.
 			if model.overlay != "approve" || model.permission.CallID != update.CallID {
@@ -535,6 +551,21 @@ func (model *Model) runSlashCommand(input string) tea.Cmd {
 		if requireNoArguments() {
 			model.overlay = "status"
 		}
+	case "plan":
+		if !requireNoArguments() {
+			return nil
+		}
+		if model.active {
+			model.status = "cancel the active turn before switching plan mode"
+			return nil
+		}
+		model.planMode = !model.planMode
+		model.controller.SetPlanMode(model.planMode)
+		if model.planMode {
+			model.status = "plan mode: read-only investigation, then approve the plan"
+		} else {
+			model.status = "plan mode off"
+		}
 	case "provider", "providers":
 		if requireNoArguments() {
 			model.status = "loading providers"
@@ -686,7 +717,19 @@ func (model *Model) handleOverlay(key string) (tea.Model, tea.Cmd) {
 		if key == "n" || key == "esc" {
 			model.overlay = ""
 		}
-	case "approve":
+	case "plan-implement":
+		switch key {
+		case "y", "enter":
+			model.overlay = ""
+			model.planMode = false
+			model.controller.SetPlanMode(false)
+			model.status = "implementing the plan"
+			return model, model.submit("Implement the approved plan above.")
+		case "n", "esc":
+			model.overlay = ""
+			model.status = "plan mode: refine the plan or /plan to leave"
+		}
+	case "approve", "plan":
 		if key == "y" || key == "n" || key == "esc" {
 			callID, allowed := model.permission.CallID, key == "y"
 			model.overlay = ""
@@ -795,6 +838,12 @@ func (model *Model) render() string {
 	}
 	if model.overlay == "cancel" {
 		return overlay(model.width, model.height, "Cancel active turn?", "The active process will stop; queued prompts remain durable. [y/N]")
+	}
+	if model.overlay == "plan" {
+		return overlay(model.width, model.height, "Approve plan?", fmt.Sprintf("%s\n\n[y] approve and continue  [n] reject", Sanitize(model.permission.Text)))
+	}
+	if model.overlay == "plan-implement" {
+		return overlay(model.width, model.height, "Plan ready", "Implement this plan now with all tools?\n\n[y] implement  [n] keep planning")
 	}
 	if model.overlay == "approve" {
 		return overlay(model.width, model.height, "Approve tool call?", fmt.Sprintf("%s\n\nA permission rule requires approval for this call.\n[y] allow once  [n] reject", Sanitize(model.permission.Text)))

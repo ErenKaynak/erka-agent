@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/ErenKaynak/erka-agent/internal/routing"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 )
 
@@ -28,6 +30,10 @@ const (
 // updates are best-effort.
 const LivePermissionRequested erkaruntime.LiveUpdateKind = "permission_requested"
 
+// LivePlanRequested tells an attached UI that a pipeline plan is waiting for
+// approval; Text carries the plan.
+const LivePlanRequested erkaruntime.LiveUpdateKind = "plan_requested"
+
 const permissionReminderInterval = time.Second
 
 var ErrNoPendingPermission = errors.New("no permission request is pending for that call")
@@ -42,6 +48,7 @@ type interactiveApprover struct {
 	mu       sync.Mutex
 	pending  *pendingPermission
 	observer erkaruntime.LiveObserver
+	kind     erkaruntime.LiveUpdateKind
 }
 
 func (approver *interactiveApprover) RequestPermission(ctx context.Context, request erkaruntime.PermissionRequest) (bool, error) {
@@ -58,7 +65,11 @@ func (approver *interactiveApprover) RequestPermission(ctx context.Context, requ
 	}()
 	notify := func() {
 		if approver.observer != nil {
-			approver.observer.Observe(ctx, erkaruntime.LiveUpdate{TaskID: request.TaskID, RunID: request.RunID, Kind: LivePermissionRequested, Tool: request.Tool, CallID: request.CallID, Text: request.Summary()})
+			kind := approver.kind
+			if kind == "" {
+				kind = LivePermissionRequested
+			}
+			approver.observer.Observe(ctx, erkaruntime.LiveUpdate{TaskID: request.TaskID, RunID: request.RunID, Kind: kind, Tool: request.Tool, CallID: request.CallID, Text: request.Summary()})
 		}
 	}
 	notify()
@@ -118,7 +129,56 @@ func (session *Session) PendingPermission() (erkaruntime.PermissionRequest, bool
 	return session.interactive.current()
 }
 
-// DecidePermission answers the pending permission request for callID.
+// DecidePermission answers the pending permission or plan request for
+// callID.
 func (session *Session) DecidePermission(callID erkaruntime.ToolCallID, allowed bool) error {
-	return session.interactive.decide(callID, allowed)
+	if err := session.interactive.decide(callID, allowed); !errors.Is(err, ErrNoPendingPermission) {
+		return err
+	}
+	return session.interactivePlan.decide(callID, allowed)
+}
+
+const planInstructions = `You are erka in plan mode. Investigate the repository with read-only tools and produce a concrete implementation plan: the goal, the files to change and why, ordered steps, risks, and how to validate the change. Mutating tools are unavailable; do not claim to have changed anything. Finish with the plan.`
+
+// SetPlanMode switches subsequent turns between planning (read-only tools,
+// plan instructions, or a plan approval gate in pipelines) and normal work.
+// Like --full it lasts for this process only.
+func (session *Session) SetPlanMode(enabled bool) {
+	session.mu.Lock()
+	session.planMode = enabled
+	session.mu.Unlock()
+}
+
+// PlanMode reports whether plan mode is active.
+func (session *Session) PlanMode() bool {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.planMode
+}
+
+// planApprover returns the pipeline plan gate for this session's mode.
+func (session *Session) planApprover() routing.PlanApprover {
+	var approver erkaruntime.PermissionApprover
+	switch session.options.PermissionMode {
+	case PermissionModeAutoApprove:
+		return func(context.Context, routing.PlanApproval) (bool, error) { return true, nil }
+	case PermissionModeInteractive:
+		approver = session.interactivePlan
+	default:
+		if session.options.Approver == nil {
+			return func(_ context.Context, approval routing.PlanApproval) (bool, error) {
+				if session.options.Output != nil {
+					_, _ = fmt.Fprintf(session.options.Output, "Proposed plan:\n%s\n\nThe plan was not approved; rerun with --yes to continue automatically.\n", approval.Plan)
+				}
+				return false, nil
+			}
+		}
+		approver = session.options.Approver
+	}
+	return func(ctx context.Context, approval routing.PlanApproval) (bool, error) {
+		return approver.RequestPermission(ctx, erkaruntime.PermissionRequest{
+			TaskID: approval.TaskID, RunID: approval.RunID, CallID: erkaruntime.ToolCallID("plan:" + string(approval.RunID)),
+			Tool: "plan", Reason: "plan mode requires approval", Display: approval.Plan,
+		})
+	}
 }

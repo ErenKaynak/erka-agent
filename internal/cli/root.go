@@ -197,6 +197,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 			return fmt.Errorf("%w: --project requires --profile", ErrUsage)
 		}
 		resolved.AutoApprovePermissions = limits.autoApprove
+		resolved.PlanMode = limits.plan
 		return runTask(ctx, resolved, prompt, resume, workingDirectory, output)
 	}))
 
@@ -228,6 +229,7 @@ type runLimits struct {
 	allowFullExecution bool
 	project            string
 	autoApprove        bool
+	plan               bool
 }
 
 func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimits, io.Writer) error) *cobra.Command {
@@ -262,6 +264,7 @@ func newRunCommand(run func(context.Context, string, erkaruntime.TaskID, runLimi
 	command.Flags().DurationVar(&limits.stageTimeout, "stage-timeout", 0, "overall stage timeout (ERKA_STAGE_TIMEOUT)")
 	command.Flags().DurationVar(&limits.stageTimeout, "timeout", 0, "overall stage timeout (alias for --stage-timeout)")
 	command.Flags().StringVar(&limits.project, "project", "", "remote server project ID")
+	command.Flags().BoolVar(&limits.plan, "plan", false, "plan only with read-only tools (pipelines pause for plan approval; --yes approves)")
 	command.Flags().BoolVar(&limits.autoApprove, "yes", false, "approve tool calls that permission rules mark as \"ask\"")
 	return command
 }
@@ -277,7 +280,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 				return fmt.Errorf("get working directory: %w", err)
 			}
 		}
-		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved), PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, MCPServers: resolved.MCPServers, PermissionMode: headlessPermissionMode(resolved)})
+		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved), PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, MCPServers: resolved.MCPServers, PlanMode: resolved.PlanMode, PermissionMode: headlessPermissionMode(resolved)})
 		return err
 	}
 	providerName, baseURL := resolved.Provider, resolved.BaseURL
@@ -313,6 +316,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 		PermissionMode:     headlessPermissionMode(resolved),
 		Hooks:              resolved.Hooks,
 		MCPServers:         resolved.MCPServers,
+		PlanMode:           resolved.PlanMode,
 	})
 	return err
 }
@@ -350,7 +354,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 			return err
 		}
 		defer session.Close()
-		model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: "pipeline", Model: resolved.ActivePipeline, Branch: session.Branch(ctx), Full: options.Full, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
+		model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: "pipeline", Model: resolved.ActivePipeline, Branch: session.Branch(ctx), Full: options.Full, Pipeline: true, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
 		return tui.Run(model, input, output)
 	}
 	key, _, credentialErr := resolveNativeKey(ctx, manager, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)

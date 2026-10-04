@@ -2,6 +2,7 @@ package routing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -21,7 +22,24 @@ type PipelineEngine struct {
 	IDs     erkaruntime.IDGenerator
 	Clock   func() time.Time
 	Limits  erkaruntime.NativeLimits
+	// PlanApprover, when set, pauses the pipeline after planning until the
+	// plan is approved. The decision is recorded as a plan.decided event and
+	// replayed on resume.
+	PlanApprover PlanApprover
 }
+
+// PlanApproval asks a person to approve the planning stage's output.
+type PlanApproval struct {
+	TaskID erkaruntime.TaskID
+	RunID  erkaruntime.RunID
+	Plan   string
+}
+
+// PlanApprover returns true to continue with the plan.
+type PlanApprover func(context.Context, PlanApproval) (bool, error)
+
+// ErrPlanRejected ends a pipeline whose plan was not approved.
+var ErrPlanRejected = errors.New("plan was rejected")
 
 type PipelineRequest struct {
 	TaskID     erkaruntime.TaskID
@@ -83,6 +101,11 @@ func (engine *PipelineEngine) Run(ctx context.Context, request PipelineRequest) 
 			}
 			last = stageAttempt{Run: request.InitialRun, Checkpoint: checkpoint}
 			initial = nil
+			if stage == StagePlanning {
+				if gateErr := engine.planGate(ctx, request.TaskID, last); gateErr != nil {
+					return engine.result(ctx, request.TaskID, last), gateErr
+				}
+			}
 			stage, err = nextStage(pipeline, stage, checkpoint, repairs)
 		case erkaruntime.RunQueued, erkaruntime.RunRunning, erkaruntime.RunWaiting:
 			attempts[stage] = request.InitialRun.Attempt - 1
@@ -113,6 +136,11 @@ func (engine *PipelineEngine) Run(ctx context.Context, request PipelineRequest) 
 		}
 		if stage == StageRepair {
 			repairs++
+		}
+		if stage == StagePlanning {
+			if gateErr := engine.planGate(ctx, request.TaskID, last); gateErr != nil {
+				return engine.result(ctx, request.TaskID, last), gateErr
+			}
 		}
 		stage, err = nextStage(pipeline, stage, last.Checkpoint, repairs)
 	}
@@ -416,6 +444,58 @@ func (engine *PipelineEngine) result(ctx context.Context, taskID erkaruntime.Tas
 // validationPassed reports the verdict recorded in a validation checkpoint.
 // Structured reports are authoritative; anything unparseable was already
 // recorded as a fail report when the checkpoint was created.
+// planGate applies the optional plan approval after the planning stage. A
+// decision already recorded for this planning run is replayed.
+func (engine *PipelineEngine) planGate(ctx context.Context, taskID erkaruntime.TaskID, planning stageAttempt) error {
+	if engine.PlanApprover == nil {
+		return nil
+	}
+	events, err := engine.Store.LoadEvents(ctx, taskID, 0)
+	if err != nil {
+		return err
+	}
+	for index := len(events) - 1; index >= 0; index-- {
+		event := events[index]
+		if event.Type != "plan.decided" || event.RunID != planning.Run.ID {
+			continue
+		}
+		var decision struct {
+			Approved bool `json:"approved"`
+		}
+		if err := json.Unmarshal(event.Data, &decision); err != nil {
+			return fmt.Errorf("decode recorded plan decision: %w", err)
+		}
+		if !decision.Approved {
+			return ErrPlanRejected
+		}
+		return nil
+	}
+	approved, err := engine.PlanApprover(ctx, PlanApproval{TaskID: taskID, RunID: planning.Run.ID, Plan: planning.Checkpoint.ApprovedPlan})
+	if err != nil {
+		return err
+	}
+	snapshot, err := engine.Store.LoadTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	event, err := engine.newEvent(snapshot.LastEventSequence+1, taskID, planning.Run.ID, "plan.decided", "Plan rejected")
+	if err != nil {
+		return err
+	}
+	if approved {
+		event.Message = "Plan approved"
+	}
+	event.Data, _ = json.Marshal(map[string]any{"approved": approved})
+	if _, err := engine.Store.Commit(ctx, erkaruntime.CommitRequest{TaskID: taskID, ExpectedItemSequence: snapshot.LastItemSequence, ExpectedEventSequence: snapshot.LastEventSequence, Events: []erkaruntime.Event{event}}); err != nil {
+		return err
+	}
+	if !approved {
+		_ = engine.failTask(ctx, taskID, planning.Run.ID, "plan_rejected", ErrPlanRejected)
+		return ErrPlanRejected
+	}
+	return nil
+}
+
 func validationPassed(checkpoint erkaruntime.Checkpoint) bool {
 	if checkpoint.Validation != nil {
 		return checkpoint.Validation.Passed()

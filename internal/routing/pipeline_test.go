@@ -351,3 +351,65 @@ func (stream *pipelineStream) Next(context.Context) (erkaruntime.ModelOutput, er
 	return output, nil
 }
 func (*pipelineStream) Close() error { return nil }
+
+func planGateEngine(t *testing.T, approver PlanApprover) (*PipelineEngine, *pipelineProvider, *pipelineProvider, *store.Memory, erkaruntime.Run) {
+	t.Helper()
+	memory, initial, ids, now := seededPipeline(t)
+	planner := &pipelineProvider{name: "planner", responses: [][]erkaruntime.ModelOutput{{{Kind: erkaruntime.ModelTextDelta, Text: "Plan: patch checkout.go."}, {Kind: erkaruntime.ModelCompleted}}}}
+	coder := &pipelineProvider{name: "coder", responses: [][]erkaruntime.ModelOutput{{{Kind: erkaruntime.ModelTextDelta, Text: "Coded."}, {Kind: erkaruntime.ModelCompleted}}}}
+	engine := testPipelineEngine(memory, ids, now, pipelineConfig(), func(_ context.Context, _ Candidate, stage Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
+		provider := coder
+		if stage == StagePlanning {
+			provider = planner
+		}
+		return &erkaruntime.NativeBackend{Provider: provider, Instructions: "pipeline", Limits: limits, IDs: ids, Clock: func() time.Time { return now }}, nil
+	})
+	engine.PlanApprover = approver
+	return engine, planner, coder, memory, initial
+}
+
+func TestPipelinePlanGateApprovesAndRecordsDecision(t *testing.T) {
+	t.Parallel()
+	var seen PlanApproval
+	engine, _, coder, memory, initial := planGateEngine(t, func(_ context.Context, approval PlanApproval) (bool, error) {
+		seen = approval
+		return true, nil
+	})
+	result, err := engine.Run(context.Background(), PipelineRequest{TaskID: "task-1", Objective: "fix checkout", InitialRun: initial})
+	if err != nil || result.Status != erkaruntime.TaskCompleted || len(coder.Requests()) != 1 {
+		t.Fatalf("Run() = %#v, %v", result, err)
+	}
+	if seen.Plan != "Plan: patch checkout.go." || seen.RunID != initial.ID {
+		t.Fatalf("approval = %#v", seen)
+	}
+	events, _ := memory.LoadEvents(context.Background(), "task-1", 0)
+	found := false
+	for _, event := range events {
+		if event.Type == "plan.decided" && string(event.Data) == `{"approved":true}` && event.RunID == initial.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("plan.decided event missing: %#v", events)
+	}
+}
+
+func TestPipelinePlanGateRejectionStopsBeforeCodingAndReplays(t *testing.T) {
+	t.Parallel()
+	engine, _, coder, memory, initial := planGateEngine(t, func(context.Context, PlanApproval) (bool, error) { return false, nil })
+	_, err := engine.Run(context.Background(), PipelineRequest{TaskID: "task-1", Objective: "fix checkout", InitialRun: initial})
+	if !errors.Is(err, ErrPlanRejected) || len(coder.Requests()) != 0 {
+		t.Fatalf("Run() error = %v, coder requests = %d", err, len(coder.Requests()))
+	}
+	snapshot, _ := memory.LoadTask(context.Background(), "task-1")
+	if snapshot.Status != erkaruntime.TaskFailed {
+		t.Fatalf("task status = %s", snapshot.Status)
+	}
+	// A recorded decision is replayed without asking again.
+	asked := false
+	engine.PlanApprover = func(context.Context, PlanApproval) (bool, error) { asked = true; return true, nil }
+	planning, _ := memory.LoadRun(context.Background(), initial.ID)
+	if gateErr := engine.planGate(context.Background(), "task-1", stageAttempt{Run: planning}); !errors.Is(gateErr, ErrPlanRejected) || asked {
+		t.Fatalf("replayed gate = %v, asked = %v", gateErr, asked)
+	}
+}

@@ -78,6 +78,8 @@ type Resolved struct {
 	// AutoApprovePermissions answers every "ask" verdict with allow. It is
 	// set only by `erka run --yes` and never read from configuration.
 	AutoApprovePermissions bool
+	// PlanMode is set only by `erka run --plan`.
+	PlanMode bool
 	// Hooks are user-configured commands run after workspace edits.
 	Hooks hooks.Config
 	// MCPServers are Model Context Protocol tool servers.

@@ -41,11 +41,16 @@ type PermissionRequest struct {
 	Arguments json.RawMessage
 	Rule      string
 	Reason    string
+	// Display, when set, replaces the default summary (used for plans).
+	Display string
 }
 
 // Summary renders the request for prompts and approval records. Arguments
 // are tool input produced by the model and never contain provider secrets.
 func (request PermissionRequest) Summary() string {
+	if request.Display != "" {
+		return request.Display
+	}
 	arguments := strings.TrimSpace(string(request.Arguments))
 	if len(arguments) > 512 {
 		arguments = arguments[:512] + "…"
