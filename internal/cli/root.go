@@ -18,6 +18,7 @@ import (
 	"github.com/ErenKaynak/erka-agent/internal/bridges"
 	"github.com/ErenKaynak/erka-agent/internal/buildinfo"
 	"github.com/ErenKaynak/erka-agent/internal/config"
+	"github.com/ErenKaynak/erka-agent/internal/providers/anthropic"
 	"github.com/ErenKaynak/erka-agent/internal/providers/deepseek"
 	"github.com/ErenKaynak/erka-agent/internal/providers/openai"
 	"github.com/ErenKaynak/erka-agent/internal/providers/openaicompat"
@@ -526,6 +527,8 @@ func openNativeProvider(providerName, baseURL, model, key string) (erkaruntime.M
 		return deepseek.New(deepseek.Options{APIKey: key, BaseURL: baseURL, Model: model})
 	case "openai":
 		return openai.New(openai.Options{APIKey: key, BaseURL: baseURL, Model: model})
+	case anthropic.Name:
+		return anthropic.New(anthropic.Options{APIKey: key, BaseURL: baseURL, Model: model})
 	case openaicompat.Name:
 		return openaicompat.New(openaicompat.Options{APIKey: key, BaseURL: baseURL, Model: model})
 	default:

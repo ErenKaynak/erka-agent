@@ -61,6 +61,10 @@ var providerSpecs = map[string]ProviderSpec{
 		Name: "openai", Class: ConnectionNative, Credentials: []CredentialKind{CredentialAPIKey},
 		DefaultBaseURL: DefaultOpenAIURL, DefaultAPIKeyEnv: "OPENAI_API_KEY", RequiresModel: true,
 	},
+	"anthropic": {
+		Name: "anthropic", Class: ConnectionNative, Credentials: []CredentialKind{CredentialAPIKey},
+		DefaultBaseURL: DefaultAnthropicURL, DefaultAPIKeyEnv: "ANTHROPIC_API_KEY", RequiresModel: true,
+	},
 	"openai_compatible": {
 		Name: "openai_compatible", Class: ConnectionNative, Credentials: []CredentialKind{CredentialAPIKey},
 		APIKeyOptional: true, RequiresModel: true,

@@ -483,6 +483,16 @@ func responseEvents(response assembledResponse) []pendingEvent {
 	if len(response.calls) == 0 && strings.TrimSpace(response.text) != "" {
 		events = append(events, pendingEvent{Type: "model.completed", Message: "Model response completed"})
 	}
+	if usage := response.usage; usage != nil {
+		events = append(events, pendingEvent{
+			Type: "model.usage", Message: usageMessage(*usage),
+			Data: eventData(map[string]any{
+				"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens,
+				"cache_read_tokens": usage.CacheReadTokens, "cache_write_tokens": usage.CacheWriteTokens,
+				"cache_hit": usage.CacheReadTokens > 0,
+			}),
+		})
+	}
 	return events
 }
 
@@ -882,6 +892,13 @@ func (failure *StageError) Unwrap() error {
 		return nil
 	}
 	return failure.Cause
+}
+
+func usageMessage(usage Usage) string {
+	if usage.CacheReadTokens > 0 {
+		return fmt.Sprintf("Model used %d input tokens (%d from cache) and %d output tokens", usage.InputTokens, usage.CacheReadTokens, usage.OutputTokens)
+	}
+	return fmt.Sprintf("Model used %d input tokens (cache miss) and %d output tokens", usage.InputTokens, usage.OutputTokens)
 }
 
 func eventData(value map[string]any) json.RawMessage {

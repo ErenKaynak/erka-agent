@@ -82,7 +82,7 @@ func TestNativeBackendPersistsToolLoopInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantEvents := []string{
-		"task.started", "stage.started", "tool.started", "tool.completed",
+		"task.started", "stage.started", "tool.started", "model.usage", "tool.completed",
 		"model.completed", "task.validating", "task.completed",
 	}
 	if len(events) != len(wantEvents) {
@@ -95,6 +95,15 @@ func TestNativeBackendPersistsToolLoopInOrder(t *testing.T) {
 	}
 	if sink.Count() != len(events) {
 		t.Fatalf("published event count = %d, want %d", sink.Count(), len(events))
+	}
+	var usageData struct {
+		InputTokens     int64 `json:"input_tokens"`
+		OutputTokens    int64 `json:"output_tokens"`
+		CacheReadTokens int64 `json:"cache_read_tokens"`
+		CacheHit        bool  `json:"cache_hit"`
+	}
+	if err := json.Unmarshal(events[3].Data, &usageData); err != nil || usageData.InputTokens != 10 || usageData.OutputTokens != 3 || usageData.CacheHit {
+		t.Fatalf("model.usage data = %s, %v", events[3].Data, err)
 	}
 }
 

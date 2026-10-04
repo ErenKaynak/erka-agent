@@ -206,3 +206,35 @@ func TestTopLevelOpenAICompatibleProvider(t *testing.T) {
 		t.Fatalf("missing model error = %v", err)
 	}
 }
+
+func TestAnthropicConnectionDefaultsAndCachePricing(t *testing.T) {
+	t.Parallel()
+	got, err := loadConnections(t, `
+  claude:
+    provider: anthropic
+    models:
+      claude-test:
+        input_cost_per_million_microunits: 3000000
+        output_cost_per_million_microunits: 15000000
+        cache_read_cost_per_million_microunits: 300000
+        cache_write_cost_per_million_microunits: 3750000
+        currency: USD`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := got.Connections["claude"]
+	if connection.BaseURL != DefaultAnthropicURL || connection.APIKeyEnv != "ANTHROPIC_API_KEY" || connection.Credential != CredentialAPIKey {
+		t.Fatalf("connection = %#v", connection)
+	}
+	if connection.Models["claude-test"].CacheReadCostPerMillionMicrounits != 300000 {
+		t.Fatalf("model = %#v", connection.Models["claude-test"])
+	}
+	for _, broken := range []string{
+		"\n  claude:\n    provider: anthropic\n    models:\n      m:\n        cache_read_cost_per_million_microunits: 1",
+		"\n  claude:\n    provider: anthropic\n    models:\n      m:\n        cache_write_cost_per_million_microunits: -1\n        currency: USD",
+	} {
+		if _, err := loadConnections(t, broken); err == nil {
+			t.Fatalf("accepted invalid cache pricing: %s", broken)
+		}
+	}
+}

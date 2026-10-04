@@ -78,6 +78,33 @@ func TestPriceUsageAndBudget(t *testing.T) {
 	}
 }
 
+func TestPriceUsageWithCachePricing(t *testing.T) {
+	t.Parallel()
+	model := config.ModelConfig{
+		InputCostPerMillionMicrounits: 3_000_000, OutputCostPerMillionMicrounits: 15_000_000,
+		CacheReadCostPerMillionMicrounits: 300_000, CacheWriteCostPerMillionMicrounits: 3_750_000, Currency: "USD",
+	}
+	// 1M total input: 600k cache reads, 100k cache writes, 300k uncached.
+	usage, err := PriceUsage(erkaruntime.Usage{InputTokens: 1_000_000, CacheReadTokens: 600_000, CacheWriteTokens: 100_000, OutputTokens: 100_000}, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := int64(900_000 + 1_500_000 + 180_000 + 375_000)
+	if usage.CostMicrounits != want || usage.Currency != "USD" {
+		t.Fatalf("cost = %d, want %d", usage.CostMicrounits, want)
+	}
+	// Without cache prices, cached tokens keep the input rate (unchanged behavior).
+	plain, err := PriceUsage(erkaruntime.Usage{InputTokens: 1_000_000, CacheReadTokens: 600_000}, config.ModelConfig{InputCostPerMillionMicrounits: 2, Currency: "USD"})
+	if err != nil || plain.CostMicrounits != 2 {
+		t.Fatalf("plain = %#v, %v", plain, err)
+	}
+	// Inconsistent provider counts never produce a negative uncached charge.
+	odd, err := PriceUsage(erkaruntime.Usage{InputTokens: 10, CacheReadTokens: 50}, model)
+	if err != nil || odd.CostMicrounits != 15 {
+		t.Fatalf("odd = %#v, %v", odd, err)
+	}
+}
+
 func TestCanFallbackIsDeterministicAndMutationSafe(t *testing.T) {
 	t.Parallel()
 	if !CanFallback(&AttemptError{Kind: FailureRateLimit, Err: errors.New("busy")}) {

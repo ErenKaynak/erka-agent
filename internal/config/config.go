@@ -24,6 +24,7 @@ const (
 	DefaultModel                 = "deepseek-v4-flash"
 	DefaultDeepSeekURL           = "https://api.deepseek.com"
 	DefaultOpenAIURL             = "https://api.openai.com"
+	DefaultAnthropicURL          = "https://api.anthropic.com"
 	DefaultAPIKeyEnv             = "ERKA_DEEPSEEK_API_KEY"
 	DefaultMaxIterations         = 24
 	DefaultMaxOutputToken        = int64(8192)
@@ -93,7 +94,11 @@ type ModelConfig struct {
 	ContextTokens                  int64    `yaml:"context_tokens,omitempty"`
 	InputCostPerMillionMicrounits  int64    `yaml:"input_cost_per_million_microunits,omitempty"`
 	OutputCostPerMillionMicrounits int64    `yaml:"output_cost_per_million_microunits,omitempty"`
-	Currency                       string   `yaml:"currency,omitempty"`
+	// Optional cache pricing. When either is set, cached input tokens are
+	// billed at these rates instead of the regular input rate.
+	CacheReadCostPerMillionMicrounits  int64  `yaml:"cache_read_cost_per_million_microunits,omitempty"`
+	CacheWriteCostPerMillionMicrounits int64  `yaml:"cache_write_cost_per_million_microunits,omitempty"`
+	Currency                           string `yaml:"currency,omitempty"`
 }
 
 type Pipeline struct {
@@ -382,10 +387,10 @@ func validateRouting(resolved *Resolved) error {
 			return err
 		}
 		for model, metadata := range connection.Models {
-			if strings.TrimSpace(model) == "" || metadata.ContextTokens < 0 || metadata.InputCostPerMillionMicrounits < 0 || metadata.OutputCostPerMillionMicrounits < 0 {
+			if strings.TrimSpace(model) == "" || metadata.ContextTokens < 0 || metadata.InputCostPerMillionMicrounits < 0 || metadata.OutputCostPerMillionMicrounits < 0 || metadata.CacheReadCostPerMillionMicrounits < 0 || metadata.CacheWriteCostPerMillionMicrounits < 0 {
 				return fmt.Errorf("connection %q has invalid model metadata for %q", name, model)
 			}
-			if (metadata.InputCostPerMillionMicrounits > 0 || metadata.OutputCostPerMillionMicrounits > 0) && strings.TrimSpace(metadata.Currency) == "" {
+			if (metadata.InputCostPerMillionMicrounits > 0 || metadata.OutputCostPerMillionMicrounits > 0 || metadata.CacheReadCostPerMillionMicrounits > 0 || metadata.CacheWriteCostPerMillionMicrounits > 0) && strings.TrimSpace(metadata.Currency) == "" {
 				return fmt.Errorf("connection %q model %q pricing requires a currency", name, model)
 			}
 			for _, capability := range metadata.Capabilities {

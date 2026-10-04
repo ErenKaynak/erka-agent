@@ -172,18 +172,43 @@ func StandardStages(pipeline config.Pipeline) []Stage {
 // PriceUsage converts provider-neutral token counts to configured microunits,
 // rounding fractional microunits upward so budget enforcement is conservative.
 func PriceUsage(usage erkaruntime.Usage, model config.ModelConfig) (erkaruntime.Usage, error) {
-	if model.InputCostPerMillionMicrounits == 0 && model.OutputCostPerMillionMicrounits == 0 {
+	cachePricing := model.CacheReadCostPerMillionMicrounits > 0 || model.CacheWriteCostPerMillionMicrounits > 0
+	if model.InputCostPerMillionMicrounits == 0 && model.OutputCostPerMillionMicrounits == 0 && !cachePricing {
 		return usage, nil
 	}
-	input, err := priceTokens(usage.InputTokens, model.InputCostPerMillionMicrounits)
+	// InputTokens always includes cached tokens. Without cache prices every
+	// input token is billed at the input rate, exactly as before.
+	uncached := usage.InputTokens
+	var cacheRead, cacheWrite int64
+	if cachePricing {
+		uncached -= usage.CacheReadTokens + usage.CacheWriteTokens
+		if uncached < 0 {
+			uncached = 0
+		}
+		var err error
+		if cacheRead, err = priceTokens(usage.CacheReadTokens, model.CacheReadCostPerMillionMicrounits); err != nil {
+			return erkaruntime.Usage{}, err
+		}
+		if cacheWrite, err = priceTokens(usage.CacheWriteTokens, model.CacheWriteCostPerMillionMicrounits); err != nil {
+			return erkaruntime.Usage{}, err
+		}
+	}
+	input, err := priceTokens(uncached, model.InputCostPerMillionMicrounits)
 	if err != nil {
 		return erkaruntime.Usage{}, err
 	}
 	output, err := priceTokens(usage.OutputTokens, model.OutputCostPerMillionMicrounits)
-	if err != nil || input > math.MaxInt64-output {
-		return erkaruntime.Usage{}, errors.New("usage price overflows int64")
+	if err != nil {
+		return erkaruntime.Usage{}, err
 	}
-	usage.CostMicrounits = input + output
+	total := int64(0)
+	for _, part := range []int64{input, output, cacheRead, cacheWrite} {
+		if total > math.MaxInt64-part {
+			return erkaruntime.Usage{}, errors.New("usage price overflows int64")
+		}
+		total += part
+	}
+	usage.CostMicrounits = total
 	usage.Currency = model.Currency
 	return usage, nil
 }
