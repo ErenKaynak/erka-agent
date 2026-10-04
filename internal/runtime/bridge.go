@@ -26,6 +26,13 @@ type BridgeBackend struct {
 
 func (*BridgeBackend) BackendClass() string { return BackendSubscriptionBridge }
 
+// BridgeNoticer is implemented by bridges that must show the user a notice
+// (for example, an experimental status or terms reminder) whenever they run.
+// The notice is recorded as a durable bridge.notice event.
+type BridgeNoticer interface {
+	Notice() string
+}
+
 func (backend *BridgeBackend) Capabilities(ctx context.Context) (ModelCapabilities, error) {
 	if backend == nil || backend.Bridge == nil {
 		return ModelCapabilities{}, errors.New("bridge backend requires a subscription bridge")
@@ -77,6 +84,16 @@ func (backend *BridgeBackend) RunStage(ctx context.Context, request StageRequest
 	}
 	if err := appender.start(ctx, request.Objective, request.Stage); err != nil {
 		return StageResult{}, err
+	}
+	if noticer, ok := backend.Bridge.(BridgeNoticer); ok {
+		if notice := strings.TrimSpace(noticer.Notice()); notice != "" {
+			if _, err := appender.append(ctx, nil, []pendingEvent{{
+				Type: "bridge.notice", Message: notice,
+				Data: eventData(map[string]any{"bridge": backend.Bridge.Name(), "stage": request.Stage}),
+			}}); err != nil {
+				return StageResult{}, err
+			}
+		}
 	}
 	items, err := store.LoadItems(ctx, request.TaskID, 0)
 	if err != nil {

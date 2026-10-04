@@ -73,6 +73,10 @@ var providerSpecs = map[string]ProviderSpec{
 		Name: "codex", Class: ConnectionSubscriptionBridge, Credentials: []CredentialKind{CredentialVendorCLIBridge},
 		DefaultCommand: "codex",
 	},
+	"claude_code": {
+		Name: "claude_code", Class: ConnectionSubscriptionBridge, Credentials: []CredentialKind{CredentialVendorCLIBridge},
+		DefaultCommand: "claude", Experimental: true,
+	},
 	"opencode": {
 		Name: "opencode", Class: ConnectionSubscriptionBridge, Credentials: []CredentialKind{CredentialVendorCLIBridge},
 		DefaultCommand: "opencode",

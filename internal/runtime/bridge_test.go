@@ -108,3 +108,50 @@ func (bridge *recordingBridge) Execute(_ context.Context, request erkaruntime.Br
 }
 
 var _ erkaruntime.SubscriptionBridge = (*recordingBridge)(nil)
+
+type noticingBridge struct {
+	*recordingBridge
+}
+
+func (noticingBridge) Notice() string { return "Experimental bridge: subject to the vendor's terms." }
+
+func TestBridgeBackendRecordsBridgeNoticeEvent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 10, 4, 16, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	memory := store.NewMemory()
+	project := erkaruntime.Project{ID: "project-notice", Root: root, CreatedAt: now}
+	task := erkaruntime.Task{ID: "task-notice", ProjectID: project.ID, Objective: "plan", Pipeline: "default", Status: erkaruntime.TaskQueued, CreatedAt: now, UpdatedAt: now}
+	run := erkaruntime.Run{ID: "run-notice", TaskID: task.ID, Stage: string(erkaruntime.StagePlanning), BackendClass: erkaruntime.BackendSubscriptionBridge, Connection: "claude", Provider: "claude_code", Model: "default", Attempt: 1, Status: erkaruntime.RunQueued, CreatedAt: now, UpdatedAt: now}
+	for _, err := range []error{memory.CreateProject(ctx, project), memory.CreateTask(ctx, task), memory.CreateRun(ctx, run)} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	bridge := noticingBridge{&recordingBridge{result: erkaruntime.BridgeResult{Checkpoint: erkaruntime.Checkpoint{Objective: "plan", ApprovedPlan: "do it"}}}}
+	backend := &erkaruntime.BridgeBackend{
+		Bridge: bridge, WorkingDirectory: root, Model: "default",
+		Limits: erkaruntime.NativeLimits{MaxIterations: 1, MaxOutputTokens: 1024, MaxModelOutputBytes: 4096, MaxCumulativeToolOutputBytes: 1, StageTimeout: time.Minute},
+		Clock:  func() time.Time { return now },
+	}
+	if _, err := backend.RunStage(ctx, erkaruntime.StageRequest{TaskID: task.ID, RunID: run.ID, Objective: task.Objective, Stage: erkaruntime.StagePlanning, ContextMaxBytes: 8192}, memory); err != nil {
+		t.Fatal(err)
+	}
+	events, err := memory.LoadEvents(ctx, task.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notices int
+	for _, event := range events {
+		if event.Type == "bridge.notice" {
+			notices++
+			if !strings.Contains(event.Message, "vendor's terms") || string(event.Data) != `{"bridge":"fixture","stage":"planning"}` {
+				t.Fatalf("notice event = %#v", event)
+			}
+		}
+	}
+	if notices != 1 || events[len(events)-1].Type != "stage.output" {
+		t.Fatalf("events = %#v", events)
+	}
+}

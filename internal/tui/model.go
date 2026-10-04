@@ -949,7 +949,7 @@ func providersContents(infos []ProviderInfo) string {
 			fmt.Fprintf(&builder, "  configured models: %s\n", strings.Join(info.Models, ", "))
 		}
 	}
-	builder.WriteString("\nConnect a native key:\n  export ERKA_DEEPSEEK_API_KEY=… (or ERKA_OPENAI_API_KEY=…), then restart erka\n\nConnect a subscription bridge:\n  erka auth login codex --device\n  erka auth login opencode\n\nUse /model to discover and switch configured stage models.\n\nEsc close")
+	builder.WriteString("\nConnect a native key:\n  export ERKA_DEEPSEEK_API_KEY=… (or OPENAI_API_KEY, ANTHROPIC_API_KEY, or a connection's api_key_env), then restart erka\n\nConnect a subscription bridge:\n  erka auth login codex --device\n  erka auth login opencode\n  erka auth login claude   (experimental)\n\nUse /model to discover and switch configured stage models.\n\nEsc close")
 	return builder.String()
 }
 

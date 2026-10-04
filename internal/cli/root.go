@@ -475,7 +475,24 @@ func sortedModelKeys(models map[string]config.ModelConfig) []string {
 	return keys
 }
 
+func containsNotice(notices []string, notice string) bool {
+	for _, existing := range notices {
+		if existing == notice {
+			return true
+		}
+	}
+	return false
+}
+
 func bridgeStatus(ctx context.Context, name string, connection config.Connection) tui.ProviderInfo {
+	info := bridgeAvailabilityStatus(ctx, name, connection)
+	if spec, ok := config.LookupProvider(connection.Provider); ok && spec.Experimental {
+		info.Detail += " [experimental; run `erka providers` for terms]"
+	}
+	return info
+}
+
+func bridgeAvailabilityStatus(ctx context.Context, name string, connection config.Connection) tui.ProviderInfo {
 	info := tui.ProviderInfo{Name: name, Class: config.ConnectionSubscriptionBridge, Detail: connection.Provider, Models: sortedModelKeys(connection.Models)}
 	bridge, err := bridges.New(connection.Provider, connection.Command)
 	if err != nil {
@@ -578,7 +595,7 @@ func newAuthCommand(input io.Reader) *cobra.Command {
 	command := &cobra.Command{Use: "auth", Short: "Manage subscription bridge authentication", Args: noArgs}
 	var device bool
 	login := &cobra.Command{
-		Use: "login <codex|opencode>", Short: "Delegate login to an official bridge CLI",
+		Use: "login <codex|opencode|claude>", Short: "Delegate login to an official bridge CLI",
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("%w: auth login requires exactly one bridge name", ErrUsage)
@@ -589,6 +606,11 @@ func newAuthCommand(input io.Reader) *cobra.Command {
 			if device && strings.ToLower(strings.TrimSpace(args[0])) != "codex" {
 				return fmt.Errorf("%w: --device is only supported for codex", ErrUsage)
 			}
+			if bridges.NormalizeBridgeName(args[0]) == "claude_code" {
+				if _, err := fmt.Fprintln(command.ErrOrStderr(), bridges.ClaudeCodeNotice); err != nil {
+					return err
+				}
+			}
 			return bridges.Login(command.Context(), args[0], "", device, input, command.OutOrStdout(), command.ErrOrStderr())
 		},
 	}
@@ -596,7 +618,7 @@ func newAuthCommand(input io.Reader) *cobra.Command {
 	status := &cobra.Command{
 		Use: "status", Short: "Report subscription bridge authentication", Args: noArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			for _, bridge := range []erkaruntime.SubscriptionBridge{bridges.NewCodex(bridges.CodexOptions{}), bridges.NewOpenCode(bridges.OpenCodeOptions{})} {
+			for _, bridge := range []erkaruntime.SubscriptionBridge{bridges.NewCodex(bridges.CodexOptions{}), bridges.NewOpenCode(bridges.OpenCodeOptions{}), bridges.NewClaudeCode(bridges.ClaudeCodeOptions{})} {
 				availability, err := bridge.Availability(command.Context())
 				if err != nil {
 					return fmt.Errorf("inspect %s bridge: %w", bridge.Name(), err)
@@ -639,6 +661,12 @@ func newProvidersCommand(load func(context.Context) (config.Resolved, error)) *c
 				names = append(names, name)
 			}
 			sort.Strings(names)
+			var notices []string
+			defer func() {
+				for _, notice := range notices {
+					_, _ = fmt.Fprintln(command.OutOrStdout(), "\n"+notice)
+				}
+			}()
 			for _, name := range names {
 				connection := resolved.Connections[name]
 				state := "configured"
@@ -659,6 +687,9 @@ func newProvidersCommand(load func(context.Context) (config.Resolved, error)) *c
 					if available.Authenticated {
 						state = "available"
 					}
+					if noticer, ok := bridge.(erkaruntime.BridgeNoticer); ok && !containsNotice(notices, noticer.Notice()) {
+						notices = append(notices, noticer.Notice())
+					}
 					caps, _ := bridge.Capabilities(command.Context())
 					capabilities = fmt.Sprintf("tools=%t structured_output=%t", caps.Tools, caps.StructuredOutput)
 				}
@@ -668,6 +699,7 @@ func newProvidersCommand(load func(context.Context) (config.Resolved, error)) *c
 				if _, err := fmt.Fprintf(command.OutOrStdout(), "%s\t%s\t%s\t%s\t%s\n", name, connection.Class, connection.Provider, state, capabilities); err != nil {
 					return err
 				}
+
 			}
 			return nil
 		},

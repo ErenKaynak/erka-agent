@@ -71,6 +71,8 @@ func New(provider, executable string) (erkaruntime.SubscriptionBridge, error) {
 		return NewCodex(CodexOptions{Executable: executable}), nil
 	case "opencode":
 		return NewOpenCode(OpenCodeOptions{Executable: executable}), nil
+	case "claude_code":
+		return NewClaudeCode(ClaudeCodeOptions{Executable: executable}), nil
 	default:
 		return nil, fmt.Errorf("unsupported subscription bridge %q", provider)
 	}

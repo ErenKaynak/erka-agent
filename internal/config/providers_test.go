@@ -238,3 +238,57 @@ func TestAnthropicConnectionDefaultsAndCachePricing(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeCodeBridgeIsExperimentalAndReadOnly(t *testing.T) {
+	t.Parallel()
+	if _, err := loadConnections(t, `
+  claude:
+    provider: claude_code
+    class: subscription_bridge`); err == nil || !strings.Contains(err.Error(), "experimental: true") {
+		t.Fatalf("missing opt-in error = %v", err)
+	}
+	got, err := loadConnections(t, `
+  claude:
+    provider: claude_code
+    class: subscription_bridge
+    experimental: true`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection := got.Connections["claude"]; connection.Command != "claude" || connection.Credential != CredentialVendorCLIBridge {
+		t.Fatalf("connection = %#v", connection)
+	}
+	if _, err := loadConnections(t, `
+  claude:
+    provider: claude_code
+    class: subscription_bridge
+    experimental: true
+    api_key_env: ANTHROPIC_API_KEY`); err == nil {
+		t.Fatal("a vendor CLI bridge accepted an API key environment variable")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `version: 1
+pipeline: default
+connections:
+  claude:
+    provider: claude_code
+    class: subscription_bridge
+    experimental: true
+  coder:
+    provider: deepseek
+pipelines:
+  default:
+    routing: fixed
+    stages:
+      planning:
+        candidates: [claude/default]
+      coding:
+        candidates: [claude/default]
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(context.Background(), Options{ConfigPath: path, GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil)}); err == nil || !strings.Contains(err.Error(), "cannot use subscription bridge") {
+		t.Fatalf("coding-stage bridge error = %v", err)
+	}
+}
