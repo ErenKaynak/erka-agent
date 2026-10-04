@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ErenKaynak/erka-agent/internal/config"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 	"github.com/ErenKaynak/erka-agent/internal/sandbox"
 )
@@ -62,6 +63,9 @@ func (LocalRunner) Run(ctx context.Context, invocation Invocation) (ProcessResul
 }
 
 func New(provider, executable string) (erkaruntime.SubscriptionBridge, error) {
+	if _, err := config.RequireCredential(provider, config.CredentialVendorCLIBridge); err != nil {
+		return nil, err
+	}
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codex":
 		return NewCodex(CodexOptions{Executable: executable}), nil

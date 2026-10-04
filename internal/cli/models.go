@@ -33,7 +33,7 @@ func configuredModelCatalogFactory(manager *auth.Manager) catalog.Factory {
 			}
 			return modelCatalog, nil
 		}
-		key, _, err := manager.Resolve(ctx, connection.Provider, connection.BaseURL, connection.APIKeyEnv)
+		key, _, err := resolveNativeKey(ctx, manager, connection.Provider, connection.BaseURL, connection.APIKeyEnv)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s credential: %w", connection.Provider, err)
 		}

@@ -81,6 +81,11 @@ type Connection struct {
 	BaseURL   string                 `yaml:"base_url,omitempty"`
 	APIKeyEnv string                 `yaml:"api_key_env,omitempty"`
 	Models    map[string]ModelConfig `yaml:"models,omitempty"`
+	// Credential optionally names the credential kind. When empty it is
+	// derived from Class; it must always be allowed by the provider spec.
+	Credential CredentialKind `yaml:"credential,omitempty"`
+	// Experimental must be true to enable a provider marked experimental.
+	Experimental bool `yaml:"experimental,omitempty"`
 }
 
 type ModelConfig struct {
@@ -312,24 +317,31 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 	if !isPlatformAbs(options.GOOS, resolved.StateDir) {
 		return Resolved{}, fmt.Errorf("state directory must be absolute: %q", resolved.StateDir)
 	}
-	if resolved.Provider != "deepseek" && resolved.Provider != "openai" {
+	spec, ok := LookupProvider(resolved.Provider)
+	if !ok || spec.Class != ConnectionNative || spec.Experimental {
 		return Resolved{}, fmt.Errorf("unsupported native provider %q", resolved.Provider)
 	}
-	if resolved.Provider == "openai" {
+	if !spec.Allows(CredentialAPIKey) {
+		return Resolved{}, fmt.Errorf("provider %q does not allow credential kind %q", resolved.Provider, CredentialAPIKey)
+	}
+	if spec.Name != DefaultProvider {
 		if resolved.BaseURLSource == SourceDefault {
-			resolved.BaseURL = DefaultOpenAIURL
+			if spec.DefaultBaseURL == "" {
+				return Resolved{}, fmt.Errorf("provider %q requires an explicit base URL", spec.Name)
+			}
+			resolved.BaseURL = spec.DefaultBaseURL
 		}
 		if resolved.APIKeyEnv == DefaultAPIKeyEnv {
-			resolved.APIKeyEnv = "OPENAI_API_KEY"
+			resolved.APIKeyEnv = spec.DefaultAPIKeyEnv
 		}
-		if resolved.ModelSource == SourceDefault {
-			return Resolved{}, errors.New("OpenAI provider requires an explicit model ID")
+		if spec.RequiresModel && resolved.ModelSource == SourceDefault {
+			return Resolved{}, fmt.Errorf("provider %q requires an explicit model ID", spec.Name)
 		}
 	}
-	if strings.TrimSpace(resolved.Model) == "" || strings.TrimSpace(resolved.APIKeyEnv) == "" {
+	if strings.TrimSpace(resolved.Model) == "" || (strings.TrimSpace(resolved.APIKeyEnv) == "" && !spec.APIKeyOptional) {
 		return Resolved{}, errors.New("provider model and API key environment name must not be empty")
 	}
-	if !validEnvironmentName(resolved.APIKeyEnv) {
+	if resolved.APIKeyEnv != "" && !validEnvironmentName(resolved.APIKeyEnv) {
 		return Resolved{}, fmt.Errorf("invalid API key environment name %q", resolved.APIKeyEnv)
 	}
 	if credentialEnvironmentConflicts(resolved.APIKeyEnv) {
@@ -366,43 +378,8 @@ func validateRouting(resolved *Resolved) error {
 		if connection.Class == "" {
 			connection.Class = ConnectionNative
 		}
-		switch connection.Class {
-		case ConnectionNative:
-			if connection.Provider != "deepseek" && connection.Provider != "openai" {
-				return fmt.Errorf("connection %q uses unsupported native provider %q", name, connection.Provider)
-			}
-			if connection.Command != "" {
-				return fmt.Errorf("native connection %q cannot configure a bridge command", name)
-			}
-			if connection.BaseURL == "" {
-				if connection.Provider == "openai" {
-					connection.BaseURL = DefaultOpenAIURL
-				} else {
-					connection.BaseURL = DefaultDeepSeekURL
-				}
-			}
-			if connection.APIKeyEnv == "" {
-				if connection.Provider == "openai" {
-					connection.APIKeyEnv = "OPENAI_API_KEY"
-				} else {
-					connection.APIKeyEnv = DefaultAPIKeyEnv
-				}
-			}
-			if !validEnvironmentName(connection.APIKeyEnv) || credentialEnvironmentConflicts(connection.APIKeyEnv) {
-				return fmt.Errorf("connection %q has invalid API key environment %q", name, connection.APIKeyEnv)
-			}
-		case ConnectionSubscriptionBridge:
-			if connection.Provider != "codex" && connection.Provider != "opencode" {
-				return fmt.Errorf("connection %q uses unsupported subscription bridge %q", name, connection.Provider)
-			}
-			if connection.BaseURL != "" || connection.APIKeyEnv != "" {
-				return fmt.Errorf("subscription bridge %q must not configure a base URL or API key environment", name)
-			}
-			if connection.Command == "" {
-				connection.Command = connection.Provider
-			}
-		default:
-			return fmt.Errorf("connection %q uses unsupported class %q", name, connection.Class)
+		if err := validateConnection(name, &connection); err != nil {
+			return err
 		}
 		for model, metadata := range connection.Models {
 			if strings.TrimSpace(model) == "" || metadata.ContextTokens < 0 || metadata.InputCostPerMillionMicrounits < 0 || metadata.OutputCostPerMillionMicrounits < 0 {
@@ -489,6 +466,63 @@ func validateRouting(resolved *Resolved) error {
 		}
 		if _, ok := pipeline.Stages["coding"]; !ok {
 			return fmt.Errorf("pipeline %q requires a coding stage", name)
+		}
+	}
+	return nil
+}
+
+// validateConnection normalizes one connection against its code-owned
+// provider spec and rejects any credential kind the provider does not allow.
+func validateConnection(name string, connection *Connection) error {
+	switch connection.Class {
+	case ConnectionNative, ConnectionSubscriptionBridge:
+	default:
+		return fmt.Errorf("connection %q uses unsupported class %q", name, connection.Class)
+	}
+	spec, ok := LookupProvider(connection.Provider)
+	if !ok || spec.Class != connection.Class {
+		if connection.Class == ConnectionSubscriptionBridge {
+			return fmt.Errorf("connection %q uses unsupported subscription bridge %q", name, connection.Provider)
+		}
+		return fmt.Errorf("connection %q uses unsupported native provider %q", name, connection.Provider)
+	}
+	connection.Credential = CredentialKind(strings.ToLower(strings.TrimSpace(string(connection.Credential))))
+	implied := CredentialForClass(connection.Class)
+	if connection.Credential == "" {
+		connection.Credential = implied
+	}
+	if connection.Credential != implied {
+		return fmt.Errorf("connection %q credential %q does not match class %q", name, connection.Credential, connection.Class)
+	}
+	if !spec.Allows(connection.Credential) {
+		return fmt.Errorf("connection %q: provider %q does not allow credential kind %q", name, spec.Name, connection.Credential)
+	}
+	if spec.Experimental && !connection.Experimental {
+		return fmt.Errorf("connection %q uses experimental provider %q; set `experimental: true` to opt in", name, spec.Name)
+	}
+	switch connection.Class {
+	case ConnectionNative:
+		if connection.Command != "" {
+			return fmt.Errorf("native connection %q cannot configure a bridge command", name)
+		}
+		if connection.BaseURL == "" {
+			if spec.DefaultBaseURL == "" {
+				return fmt.Errorf("connection %q (%s) requires base_url", name, spec.Name)
+			}
+			connection.BaseURL = spec.DefaultBaseURL
+		}
+		if connection.APIKeyEnv == "" && !spec.APIKeyOptional {
+			connection.APIKeyEnv = spec.DefaultAPIKeyEnv
+		}
+		if connection.APIKeyEnv != "" && (!validEnvironmentName(connection.APIKeyEnv) || credentialEnvironmentConflicts(connection.APIKeyEnv)) {
+			return fmt.Errorf("connection %q has invalid API key environment %q", name, connection.APIKeyEnv)
+		}
+	case ConnectionSubscriptionBridge:
+		if connection.BaseURL != "" || connection.APIKeyEnv != "" {
+			return fmt.Errorf("subscription bridge %q must not configure a base URL or API key environment", name)
+		}
+		if connection.Command == "" {
+			connection.Command = spec.DefaultCommand
 		}
 	}
 	return nil

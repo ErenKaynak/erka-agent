@@ -281,7 +281,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 	if baseURL == "" {
 		baseURL = deepseek.DefaultBaseURL
 	}
-	key, _, err := manager.Resolve(ctx, providerName, baseURL, resolved.APIKeyEnv)
+	key, _, err := resolveNativeKey(ctx, manager, providerName, baseURL, resolved.APIKeyEnv)
 	if errors.Is(err, auth.ErrCredentialNotFound) {
 		return fmt.Errorf("%s credential is missing: set %s or launch interactive erka", providerName, resolved.APIKeyEnv)
 	}
@@ -336,7 +336,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 		model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: "pipeline", Model: resolved.ActivePipeline, Branch: session.Branch(ctx), Full: options.Full, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
 		return tui.Run(model, input, output)
 	}
-	key, _, credentialErr := manager.Resolve(ctx, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
+	key, _, credentialErr := resolveNativeKey(ctx, manager, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
 	if credentialErr != nil {
 		key, credentialErr = tui.PromptCredential(ctx, input, output, resolved.Provider)
 		if credentialErr != nil {
@@ -351,7 +351,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 		return err
 	}
 	rebuildProvider := func(model string) (erkaruntime.ModelProvider, error) {
-		key, _, err := manager.Resolve(context.Background(), resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
+		key, _, err := resolveNativeKey(context.Background(), manager, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s credential: %w", resolved.Provider, err)
 		}
@@ -386,7 +386,10 @@ func nativeLimits(resolved config.Resolved) erkaruntime.NativeLimits {
 
 func configuredProviderFactory(manager *auth.Manager) app.ProviderFactory {
 	return func(ctx context.Context, candidate routing.Candidate) (erkaruntime.ModelProvider, error) {
-		key, _, err := manager.Resolve(ctx, candidate.Provider, candidate.BaseURL, candidate.APIKeyEnv)
+		if _, err := config.RequireCredential(candidate.Provider, config.CredentialAPIKey); err != nil {
+			return nil, &routing.AttemptError{Kind: routing.FailureInvalid, Err: fmt.Errorf("connection %q: %w", candidate.Connection, err)}
+		}
+		key, _, err := resolveNativeKey(ctx, manager, candidate.Provider, candidate.BaseURL, candidate.APIKeyEnv)
 		if err != nil {
 			kind := routing.FailureUnavailable
 			if !errors.Is(err, auth.ErrCredentialNotFound) {
@@ -448,7 +451,7 @@ func collectProviderStatus(ctx context.Context, manager *auth.Manager, resolved 
 
 func nativeStatus(ctx context.Context, manager *auth.Manager, name, provider, baseURL, apiKeyEnv string, models []string) tui.ProviderInfo {
 	info := tui.ProviderInfo{Name: name, Class: config.ConnectionNative, Detail: provider, Models: models}
-	_, _, err := manager.Resolve(ctx, provider, baseURL, apiKeyEnv)
+	_, _, err := resolveNativeKey(ctx, manager, provider, baseURL, apiKeyEnv)
 	switch {
 	case err == nil:
 		info.State = "ready"
@@ -498,7 +501,25 @@ func bridgeStatus(ctx context.Context, name string, connection config.Connection
 	return info
 }
 
+// resolveNativeKey resolves an API key for a native provider after checking
+// that the provider is allowed to use API-key credentials. Providers whose
+// spec makes the key optional return an empty key when no environment
+// variable is configured.
+func resolveNativeKey(ctx context.Context, manager *auth.Manager, providerName, baseURL, apiKeyEnv string) (string, auth.Source, error) {
+	spec, err := config.RequireCredential(providerName, config.CredentialAPIKey)
+	if err != nil {
+		return "", "", err
+	}
+	if spec.APIKeyOptional && strings.TrimSpace(apiKeyEnv) == "" {
+		return "", "", nil
+	}
+	return manager.Resolve(ctx, providerName, baseURL, apiKeyEnv)
+}
+
 func openNativeProvider(providerName, baseURL, model, key string) (erkaruntime.ModelProvider, error) {
+	if _, err := config.RequireCredential(providerName, config.CredentialAPIKey); err != nil {
+		return nil, err
+	}
 	switch providerName {
 	case "deepseek":
 		return deepseek.New(deepseek.Options{APIKey: key, BaseURL: baseURL, Model: model})
@@ -532,7 +553,7 @@ func preparePipelineCredentials(ctx context.Context, resolved config.Resolved, m
 				continue
 			}
 			seen[account] = true
-			if _, _, err = manager.Resolve(ctx, candidate.Provider, candidate.BaseURL, candidate.APIKeyEnv); err == nil {
+			if _, _, err = resolveNativeKey(ctx, manager, candidate.Provider, candidate.BaseURL, candidate.APIKeyEnv); err == nil {
 				continue
 			}
 			key, promptErr := tui.PromptCredential(ctx, input, output, candidate.Connection+" ("+candidate.Provider+")")

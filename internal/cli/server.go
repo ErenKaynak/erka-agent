@@ -283,7 +283,7 @@ func configuredServerSessionFactory(resolved config.Resolved, manager *auth.Mana
 			Limits: nativeLimits(resolved), AllowFullExecution: resolved.AllowFullExecution,
 		}
 		if resolved.ActivePipeline == "" {
-			key, _, err := manager.Resolve(ctx, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
+			key, _, err := resolveNativeKey(ctx, manager, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
 			if err != nil {
 				return nil, fmt.Errorf("resolve %s credential: %w", resolved.Provider, err)
 			}

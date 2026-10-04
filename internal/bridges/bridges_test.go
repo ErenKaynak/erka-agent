@@ -360,3 +360,17 @@ func argumentAfter(arguments []string, name string) string {
 	}
 	return ""
 }
+
+func TestNewRejectsProvidersWithoutBridgeCredentials(t *testing.T) {
+	t.Parallel()
+	for _, provider := range []string{"openai", "deepseek", "unknown"} {
+		if _, err := New(provider, ""); err == nil {
+			t.Fatalf("New(%q) succeeded; only vendor_cli_bridge providers may open a bridge", provider)
+		}
+	}
+	for _, provider := range []string{"codex", "opencode"} {
+		if _, err := New(provider, ""); err != nil {
+			t.Fatalf("New(%q) = %v", provider, err)
+		}
+	}
+}
