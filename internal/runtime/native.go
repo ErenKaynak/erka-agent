@@ -51,6 +51,9 @@ type NativeLimits struct {
 	MaxModelOutputBytes          int64
 	MaxCumulativeToolOutputBytes int64
 	StageTimeout                 time.Duration
+	// ContextBudgetBytes bounds model context when a stage has no input-token
+	// budget. Zero falls back to the model's reported context window.
+	ContextBudgetBytes int64
 }
 
 func DefaultNativeLimits() NativeLimits {
@@ -68,6 +71,9 @@ func (limits NativeLimits) validate() error {
 		limits.MaxModelOutputBytes <= 0 || limits.MaxCumulativeToolOutputBytes <= 0 ||
 		limits.StageTimeout <= 0 {
 		return errors.New("native runtime limits must all be positive")
+	}
+	if limits.ContextBudgetBytes < 0 {
+		return errors.New("context budget must not be negative")
 	}
 	return nil
 }
@@ -141,26 +147,40 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 	}
 
 	definitions := prepared.definitions()
+	budget := prepared.contextBudget(ctx, request)
 	var cumulativeUsage Usage
 	mutated := false
 	for iteration := 1; iteration <= prepared.Limits.MaxIterations; iteration++ {
 		if err := ctx.Err(); err != nil {
 			return StageResult{}, err
 		}
-		instructions, modelItems := prepared.Instructions, history
-		if request.Stage != "" {
-			runs, loadErr := loadContextRuns(ctx, store, request.RunID, history)
-			if loadErr != nil {
-				return StageResult{}, prepared.fail(ctx, appender, "context_runs_failed", loadErr)
-			}
-			packet, compileErr := CompileStageContext(ContextRequest{Stage: request.Stage, TaskID: request.TaskID, RunID: request.RunID, Items: history, Runs: runs, MaxBytes: request.ContextMaxBytes})
-			if compileErr != nil {
-				return StageResult{}, prepared.fail(ctx, appender, "context_compile_failed", compileErr)
-			}
-			instructions, modelItems = packet.Instructions, packet.Items
+		instructions, modelItems, buildErr := prepared.buildContext(ctx, store, request, history)
+		if buildErr != nil {
+			return StageResult{}, prepared.fail(ctx, appender, "context_compile_failed", buildErr)
 		}
-		if project := strings.TrimSpace(prepared.ProjectInstructions); project != "" {
-			instructions += "\n\n" + project
+		if budget > 0 && contextBytes(instructions, modelItems) > budget*compactionTriggerPercent/100 {
+			compacted, compactErr := prepared.compact(ctx, appender, request, instructions, modelItems, budget)
+			if compactErr != nil {
+				if errors.Is(compactErr, context.Canceled) || errors.Is(compactErr, context.DeadlineExceeded) {
+					return StageResult{}, compactErr
+				}
+				return StageResult{}, prepared.fail(ctx, appender, "context_compaction_failed", compactErr)
+			}
+			if len(compacted) > 0 {
+				history = append(history, compacted...)
+				for _, item := range compacted {
+					if item.Usage != nil {
+						addUsage(&cumulativeUsage, *item.Usage)
+					}
+				}
+				if instructions, modelItems, buildErr = prepared.buildContext(ctx, store, request, history); buildErr != nil {
+					return StageResult{}, prepared.fail(ctx, appender, "context_compile_failed", buildErr)
+				}
+			}
+		}
+		if size := contextBytes(instructions, modelItems); budget > 0 && size > budget {
+			err := fmt.Errorf("compiled %d bytes exceeds %d after compaction: %w", size, budget, ErrContextBudgetExceeded)
+			return StageResult{}, prepared.fail(ctx, appender, "context_compile_failed", err)
 		}
 		modelRequest := ModelRequest{
 			Instructions:    instructions,
@@ -612,6 +632,29 @@ func (backend *preparedBackend) authorize(ctx context.Context, appender *durable
 		return false, "", nil, err
 	}
 	return record.Action == PermissionAllow, denialMessage(record), committed, nil
+}
+
+// buildContext compiles the model context for one iteration: the stage
+// packet (or full history outside pipelines), project instructions, and any
+// recorded compaction. Budget enforcement happens in the caller so that
+// compaction can run before a hard failure.
+func (backend *preparedBackend) buildContext(ctx context.Context, store Store, request StageRequest, history []RuntimeItem) (string, []RuntimeItem, error) {
+	instructions, modelItems := backend.Instructions, history
+	if request.Stage != "" {
+		runs, err := loadContextRuns(ctx, store, request.RunID, history)
+		if err != nil {
+			return "", nil, err
+		}
+		packet, err := CompileStageContext(ContextRequest{Stage: request.Stage, TaskID: request.TaskID, RunID: request.RunID, Items: history, Runs: runs})
+		if err != nil {
+			return "", nil, err
+		}
+		instructions, modelItems = packet.Instructions, packet.Items
+	}
+	if project := strings.TrimSpace(backend.ProjectInstructions); project != "" {
+		instructions += "\n\n" + project
+	}
+	return instructions, applyCompaction(modelItems, history, request), nil
 }
 
 // applyHooks appends hook output to the tool result so the model sees, for

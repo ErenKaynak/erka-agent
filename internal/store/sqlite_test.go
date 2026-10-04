@@ -354,3 +354,35 @@ func seedSQLite(t *testing.T, ctx context.Context, database *SQLite, now time.Ti
 		t.Fatal(err)
 	}
 }
+
+func TestSQLitePersistsPermissionAndCompactionItems(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	filename := filepath.Join(t.TempDir(), "erka.db")
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	database, err := OpenSQLite(ctx, filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedSQLite(t, ctx, database, now)
+	items := []erkaruntime.RuntimeItem{
+		{ID: "item-1", Sequence: 1, TaskID: "task-1", RunID: "run-1", Kind: erkaruntime.ItemPermission, Time: now, Permission: &erkaruntime.PermissionRecord{CallID: "call-1", Tool: "run_command", Action: erkaruntime.PermissionDeny, DecidedBy: "rule", Rule: "run_command(rm *)"}},
+		{ID: "item-2", Sequence: 2, TaskID: "task-1", RunID: "run-1", Kind: erkaruntime.ItemCompaction, Time: now, Compaction: &erkaruntime.CompactionRecord{ThroughSequence: 1, Summary: "earlier work", SummarizedItems: 1, BeforeBytes: 900, AfterBytes: 300}},
+	}
+	if _, err := database.Commit(ctx, erkaruntime.CommitRequest{TaskID: "task-1", Items: items}); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+	reopened, err := OpenSQLite(ctx, filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	loaded, err := reopened.LoadItems(ctx, "task-1", 0)
+	if err != nil || len(loaded) != 2 {
+		t.Fatalf("LoadItems() = %#v, %v", loaded, err)
+	}
+	if loaded[0].Permission == nil || loaded[0].Permission.Rule != "run_command(rm *)" || loaded[1].Compaction == nil || loaded[1].Compaction.Summary != "earlier work" {
+		t.Fatalf("items = %#v %#v", loaded[0].Permission, loaded[1].Compaction)
+	}
+}

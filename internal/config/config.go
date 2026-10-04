@@ -54,22 +54,24 @@ type Paths struct {
 
 // Resolved is the effective M0 configuration and the source of each value.
 type Resolved struct {
-	Version            int
-	ConfigPath         string
-	ConfigPathSource   Source
-	StateDir           string
-	StateDirSource     Source
-	Provider           string
-	ProviderSource     Source
-	Model              string
-	ModelSource        Source
-	BaseURL            string
-	BaseURLSource      Source
-	APIKeyEnv          string
-	MaxIterations      int
-	MaxOutputTokens    int64
-	StageTimeout       time.Duration
-	AllowFullExecution bool
+	Version          int
+	ConfigPath       string
+	ConfigPathSource Source
+	StateDir         string
+	StateDirSource   Source
+	Provider         string
+	ProviderSource   Source
+	Model            string
+	ModelSource      Source
+	BaseURL          string
+	BaseURLSource    Source
+	APIKeyEnv        string
+	MaxIterations    int
+	MaxOutputTokens  int64
+	StageTimeout     time.Duration
+	// ContextBudgetTokens is the runtime-wide context budget (0 = model window).
+	ContextBudgetTokens int64
+	AllowFullExecution  bool
 	// PermissionRules are allow/ask/deny patterns for tool calls.
 	PermissionRules permissions.Rules
 	// AutoApprovePermissions answers every "ask" verdict with allow. It is
@@ -170,6 +172,9 @@ type fileConfig struct {
 		MaxIterations   int    `yaml:"max_iterations,omitempty"`
 		MaxOutputTokens int64  `yaml:"max_output_tokens,omitempty"`
 		StageTimeout    string `yaml:"stage_timeout,omitempty"`
+		// ContextBudgetTokens bounds model context when a stage has no
+		// max_input_tokens budget; erka compacts history near this limit.
+		ContextBudgetTokens int64 `yaml:"context_budget_tokens,omitempty"`
 	} `yaml:"runtime,omitempty"`
 	Hooks       hooks.Config `yaml:"hooks,omitempty"`
 	Permissions struct {
@@ -262,6 +267,7 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 			}
 		}
 		resolved.AllowFullExecution = loaded.Permissions.AllowFullExecution
+		resolved.ContextBudgetTokens = loaded.Runtime.ContextBudgetTokens
 		resolved.Hooks = loaded.Hooks
 		resolved.PermissionRules = permissions.Rules{Allow: loaded.Permissions.Rules.Allow, Ask: loaded.Permissions.Rules.Ask, Deny: loaded.Permissions.Rules.Deny}
 		resolved.ActivePipeline = loaded.Pipeline
@@ -375,6 +381,9 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 	}
 	if err := resolved.PermissionRules.Validate(); err != nil {
 		return Resolved{}, err
+	}
+	if resolved.ContextBudgetTokens < 0 {
+		return Resolved{}, errors.New("runtime.context_budget_tokens must not be negative")
 	}
 	if err := resolved.Hooks.Validate(); err != nil {
 		return Resolved{}, err

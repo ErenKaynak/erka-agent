@@ -728,3 +728,78 @@ func TestNativeBackendAppendsHookOutcomesAndEvents(t *testing.T) {
 		t.Fatalf("hook events = %v", types)
 	}
 }
+
+func TestNativeBackendCompactsContextNearBudgetAndReplaysSummary(t *testing.T) {
+	t.Parallel()
+	memory, request, now := seededRuntime(t)
+	big := strings.Repeat("y", 1500)
+	tool := &fakeTool{name: "read_file", output: big}
+	provider := &scriptedProvider{responses: [][]erkaruntime.ModelOutput{
+		{toolDelta("call-1", "read_file", `{}`), {Kind: erkaruntime.ModelCompleted}},
+		{toolDelta("call-2", "read_file", `{}`), {Kind: erkaruntime.ModelCompleted}},
+		{toolDelta("call-3", "read_file", `{}`), {Kind: erkaruntime.ModelCompleted}},
+		// The fourth request is the compaction call.
+		{{Kind: erkaruntime.ModelTextDelta, Text: "Read a.go three times; it is large."}, {Kind: erkaruntime.ModelUsage, Usage: &erkaruntime.Usage{InputTokens: 900, OutputTokens: 20}}, {Kind: erkaruntime.ModelCompleted}},
+		{{Kind: erkaruntime.ModelTextDelta, Text: "Finished."}, {Kind: erkaruntime.ModelCompleted}},
+	}}
+	backend := testBackend(provider, &recordingSink{}, now, tool)
+	backend.Limits.MaxIterations = 6
+	backend.Limits.MaxCumulativeToolOutputBytes = 1 << 20
+	backend.Limits.ContextBudgetBytes = 4000
+	if _, err := backend.RunStage(context.Background(), request, memory); err != nil {
+		t.Fatal(err)
+	}
+	requests := provider.requests
+	if len(requests) != 5 || !strings.Contains(requests[3].Instructions, "compact") || len(requests[3].Tools) != 0 {
+		t.Fatalf("requests = %d; compaction request = %#v", len(requests), requests[3].Instructions)
+	}
+	final := requests[4]
+	var sawSummary, sawOldResult bool
+	for _, item := range final.Items {
+		if item.Kind == erkaruntime.ItemUserMessage && strings.Contains(item.Message.Content, "Read a.go three times") {
+			sawSummary = true
+		}
+		if item.Kind == erkaruntime.ItemToolResult && item.ToolResult.CallID == "call-1" {
+			sawOldResult = true
+		}
+	}
+	if !sawSummary || sawOldResult {
+		t.Fatalf("final context summary=%v oldResult=%v: %#v", sawSummary, sawOldResult, final.Items)
+	}
+	items, _ := memory.LoadItems(context.Background(), request.TaskID, 0)
+	compactions := 0
+	for _, item := range items {
+		if item.Kind == erkaruntime.ItemCompaction {
+			compactions++
+			if item.Compaction.AfterBytes >= item.Compaction.BeforeBytes || item.Compaction.SummarizedItems == 0 {
+				t.Fatalf("compaction record = %#v", item.Compaction)
+			}
+		}
+	}
+	events, _ := memory.LoadEvents(context.Background(), request.TaskID, 0)
+	var compactedEvents int
+	for _, event := range events {
+		if event.Type == "context.compacted" {
+			compactedEvents++
+		}
+	}
+	run, _ := memory.LoadRun(context.Background(), request.RunID)
+	if compactions != 1 || compactedEvents != 1 || run.Usage.InputTokens < 900 {
+		t.Fatalf("compactions=%d events=%d usage=%#v", compactions, compactedEvents, run.Usage)
+	}
+}
+
+func TestContextOverBudgetWithoutCompactableHistoryStillFails(t *testing.T) {
+	t.Parallel()
+	memory, request, now := seededRuntime(t)
+	provider := &scriptedProvider{responses: [][]erkaruntime.ModelOutput{{{Kind: erkaruntime.ModelTextDelta, Text: "x"}, {Kind: erkaruntime.ModelCompleted}}}}
+	backend := testBackend(provider, &recordingSink{}, now)
+	backend.Limits.ContextBudgetBytes = 10
+	_, err := backend.RunStage(context.Background(), request, memory)
+	if !errors.Is(err, erkaruntime.ErrContextBudgetExceeded) && (err == nil || !strings.Contains(err.Error(), "exceeds")) {
+		t.Fatalf("error = %v", err)
+	}
+	if len(provider.requests) != 0 {
+		t.Fatalf("model was called %d times despite an impossible budget", len(provider.requests))
+	}
+}

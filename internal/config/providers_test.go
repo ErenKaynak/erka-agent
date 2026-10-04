@@ -335,3 +335,21 @@ func TestHooksLoadAndValidate(t *testing.T) {
 		t.Fatal("hook without a command was accepted")
 	}
 }
+
+func TestRuntimeContextBudgetTokens(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nruntime:\n  context_budget_tokens: 120000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(context.Background(), Options{ConfigPath: path, GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil)})
+	if err != nil || got.ContextBudgetTokens != 120000 {
+		t.Fatalf("resolved = %d, %v", got.ContextBudgetTokens, err)
+	}
+	if err := os.WriteFile(path, []byte("version: 1\nruntime:\n  context_budget_tokens: -1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(context.Background(), Options{ConfigPath: path, GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil)}); err == nil {
+		t.Fatal("negative budget accepted")
+	}
+}

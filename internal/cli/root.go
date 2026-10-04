@@ -396,7 +396,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 }
 
 func nativeLimits(resolved config.Resolved) erkaruntime.NativeLimits {
-	return erkaruntime.NativeLimits{MaxIterations: resolved.MaxIterations, MaxOutputTokens: resolved.MaxOutputTokens, MaxModelOutputBytes: 1 << 20, MaxCumulativeToolOutputBytes: 4 << 20, StageTimeout: resolved.StageTimeout}
+	return erkaruntime.NativeLimits{MaxIterations: resolved.MaxIterations, MaxOutputTokens: resolved.MaxOutputTokens, MaxModelOutputBytes: 1 << 20, MaxCumulativeToolOutputBytes: 4 << 20, StageTimeout: resolved.StageTimeout, ContextBudgetBytes: resolved.ContextBudgetTokens * 4}
 }
 
 func configuredProviderFactory(manager *auth.Manager) app.ProviderFactory {

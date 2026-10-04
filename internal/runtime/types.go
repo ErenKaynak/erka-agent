@@ -51,6 +51,7 @@ type RuntimeItem struct {
 	Checkpoint *Checkpoint
 	Error      *RuntimeError
 	Permission *PermissionRecord
+	Compaction *CompactionRecord
 }
 
 type Message struct {
@@ -122,6 +123,7 @@ func (item RuntimeItem) Validate() error {
 		item.Checkpoint != nil,
 		item.Error != nil,
 		item.Permission != nil,
+		item.Compaction != nil,
 	} {
 		if present {
 			payloads++
@@ -161,6 +163,13 @@ func (item RuntimeItem) Validate() error {
 	case ItemError:
 		if item.Error == nil || item.Error.Code == "" || item.Error.Message == "" {
 			return errors.New("error item requires a code and message")
+		}
+	case ItemCompaction:
+		if item.Compaction == nil {
+			return errors.New("compaction item requires a compaction payload")
+		}
+		if err := item.Compaction.Validate(); err != nil {
+			return err
 		}
 	case ItemPermission:
 		if item.Permission == nil {

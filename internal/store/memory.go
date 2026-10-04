@@ -394,6 +394,10 @@ func cloneItem(item erkaruntime.RuntimeItem) erkaruntime.RuntimeItem {
 		value := *item.Permission
 		result.Permission = &value
 	}
+	if item.Compaction != nil {
+		value := *item.Compaction
+		result.Compaction = &value
+	}
 	return result
 }
 
