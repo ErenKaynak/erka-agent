@@ -176,6 +176,53 @@ runtime:
   context_budget_tokens: 120000
 ```
 
+### MCP servers, plan mode, and custom commands
+
+**MCP tool servers.** erka can use tools from Model Context Protocol servers
+over stdio or streamable HTTP:
+
+```yaml
+mcp_servers:
+  docs:
+    command: npx
+    args: [-y, "@example/docs-mcp"]
+    env_from: [DOCS_API_KEY]      # forwarded by name; values stay out of config
+    read_only: true
+  github:
+    url: https://api.githubcopilot.com/mcp/
+    bearer_token_env: GITHUB_TOKEN
+```
+
+Tools appear as `mcp__<server>__<tool>`, so permission rules such as
+`deny: ["mcp__github__delete_*"]` apply. Every MCP tool is treated as
+mutating, and is therefore unavailable in read-only stages and plan mode,
+unless its server is marked `read_only: true`; server-provided hints are not
+trusted for this. Stdio servers receive only a small base environment plus
+the variables listed in `env_from`; bearer tokens are read from the named
+variable and sent only as a header. Servers that fail to start are reported as
+warnings and skipped. `erka mcp tools` lists what is available.
+
+**Plan mode.** `/plan` in the TUI (or `erka run --plan`) switches to planning:
+in single-model mode the turn runs with read-only tools and planning
+instructions, then the TUI offers to implement the plan. With a pipeline, the
+run pauses after the planning stage until you approve the plan; the decision
+is recorded as a `plan.decided` event and replayed on resume, and a rejected
+plan stops before coding. `erka run --plan` prints the plan and stops unless
+`--yes` is given.
+
+**Custom slash commands.** Put Markdown prompt templates in
+`.erka/commands/` (project) or `commands/` next to your config file (user):
+
+```markdown
+---
+description: Review the current diff
+---
+Review the working-tree diff. Focus on $ARGUMENTS and list concrete defects.
+```
+
+`/review error handling` then sends the expanded prompt. Project commands
+override user commands; built-in commands cannot be shadowed.
+
 ### Providers and credential kinds
 
 Every provider has a fixed, code-owned list of credential kinds it may use:
@@ -500,7 +547,7 @@ Development proceeds through demonstrable milestones:
 7. Extensibility and public-release packaging.
 
 Broad integrations are deferred until the local native vertical slice is
-reliable. The project does not currently include a web UI, MCP integration,
+reliable. The project does not currently include a web UI,
 multi-user SaaS, distributed workers, or automatic deployment.
 
 ## Current status
