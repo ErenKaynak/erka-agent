@@ -17,6 +17,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/ErenKaynak/erka-agent/internal/hooks"
+	"github.com/ErenKaynak/erka-agent/internal/mcp"
 	"github.com/ErenKaynak/erka-agent/internal/permissions"
 )
 
@@ -78,7 +79,9 @@ type Resolved struct {
 	// set only by `erka run --yes` and never read from configuration.
 	AutoApprovePermissions bool
 	// Hooks are user-configured commands run after workspace edits.
-	Hooks          hooks.Config
+	Hooks hooks.Config
+	// MCPServers are Model Context Protocol tool servers.
+	MCPServers     map[string]mcp.ServerConfig
 	ActivePipeline string
 	Connections    map[string]Connection
 	Pipelines      map[string]Pipeline
@@ -176,7 +179,8 @@ type fileConfig struct {
 		// max_input_tokens budget; erka compacts history near this limit.
 		ContextBudgetTokens int64 `yaml:"context_budget_tokens,omitempty"`
 	} `yaml:"runtime,omitempty"`
-	Hooks       hooks.Config `yaml:"hooks,omitempty"`
+	Hooks       hooks.Config                `yaml:"hooks,omitempty"`
+	MCPServers  map[string]mcp.ServerConfig `yaml:"mcp_servers,omitempty"`
 	Permissions struct {
 		AllowFullExecution bool `yaml:"allow_full_execution,omitempty"`
 		Rules              struct {
@@ -269,6 +273,7 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 		resolved.AllowFullExecution = loaded.Permissions.AllowFullExecution
 		resolved.ContextBudgetTokens = loaded.Runtime.ContextBudgetTokens
 		resolved.Hooks = loaded.Hooks
+		resolved.MCPServers = loaded.MCPServers
 		resolved.PermissionRules = permissions.Rules{Allow: loaded.Permissions.Rules.Allow, Ask: loaded.Permissions.Rules.Ask, Deny: loaded.Permissions.Rules.Deny}
 		resolved.ActivePipeline = loaded.Pipeline
 		resolved.Connections = loaded.Connections
@@ -386,6 +391,9 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 		return Resolved{}, errors.New("runtime.context_budget_tokens must not be negative")
 	}
 	if err := resolved.Hooks.Validate(); err != nil {
+		return Resolved{}, err
+	}
+	if err := mcp.Validate(resolved.MCPServers); err != nil {
 		return Resolved{}, err
 	}
 	if err := validateRouting(&resolved); err != nil {

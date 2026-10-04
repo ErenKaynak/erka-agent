@@ -165,6 +165,7 @@ func newRootCommand(info buildinfo.Info, loadConfig configLoader, runTask taskRu
 	root.AddCommand(newServeCommand(loadServerConfig))
 	root.AddCommand(newServerCommand(loadServerConfig))
 	root.AddCommand(newProfileCommand(loadServerConfig))
+	root.AddCommand(newMCPCommand(loadServerConfig))
 	for _, command := range newRemoteCommands(loadServerConfig, func() string { return remoteProfile }) {
 		root.AddCommand(command)
 	}
@@ -276,7 +277,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 				return fmt.Errorf("get working directory: %w", err)
 			}
 		}
-		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved), PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, PermissionMode: headlessPermissionMode(resolved)})
+		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved), PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, MCPServers: resolved.MCPServers, PermissionMode: headlessPermissionMode(resolved)})
 		return err
 	}
 	providerName, baseURL := resolved.Provider, resolved.BaseURL
@@ -311,6 +312,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 		PermissionRules:    resolved.PermissionRules,
 		PermissionMode:     headlessPermissionMode(resolved),
 		Hooks:              resolved.Hooks,
+		MCPServers:         resolved.MCPServers,
 	})
 	return err
 }
@@ -343,7 +345,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 			default:
 			}
 		})
-		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, PermissionMode: app.PermissionModeInteractive})
+		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, MCPServers: resolved.MCPServers, PermissionMode: app.PermissionModeInteractive})
 		if err != nil {
 			return err
 		}
@@ -386,7 +388,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 		default:
 		}
 	})
-	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider, PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, PermissionMode: app.PermissionModeInteractive})
+	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider, PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, MCPServers: resolved.MCPServers, PermissionMode: app.PermissionModeInteractive})
 	if err != nil {
 		return err
 	}

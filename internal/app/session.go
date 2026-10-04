@@ -12,6 +12,7 @@ import (
 
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	"github.com/ErenKaynak/erka-agent/internal/hooks"
+	"github.com/ErenKaynak/erka-agent/internal/mcp"
 	"github.com/ErenKaynak/erka-agent/internal/permissions"
 	"github.com/ErenKaynak/erka-agent/internal/projectdocs"
 	"github.com/ErenKaynak/erka-agent/internal/routing"
@@ -45,6 +46,9 @@ type SessionOptions struct {
 	PermissionMode PermissionMode
 	// Hooks are post-edit commands from configuration.
 	Hooks hooks.Config
+	// MCPServers are started lazily on the first turn and closed with the
+	// session.
+	MCPServers map[string]mcp.ServerConfig
 }
 
 type ProviderFactory func(context.Context, routing.Candidate) (erkaruntime.ModelProvider, error)
@@ -64,6 +68,8 @@ type Session struct {
 	turnActive     bool
 	modelOverrides map[erkaruntime.Stage]string
 	interactive    *interactiveApprover
+	mcpOnce        sync.Once
+	mcp            *mcp.Manager
 }
 
 type Conversation struct {
@@ -150,7 +156,9 @@ func (session *Session) Close() error {
 	if session.cancel != nil {
 		session.cancel()
 	}
+	manager := session.mcp
 	session.mu.Unlock()
+	_ = manager.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = session.database.ReleaseLease(ctx, session.project, session.holder)
@@ -342,6 +350,7 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 		return LocalResult{}, false, err
 	}
 	approver := session.approver()
+	extraTools := session.mcpTools()
 	var hookRunner erkaruntime.ToolHook
 	if !session.options.Hooks.Empty() {
 		runner, hookErr := hooks.NewRunner(session.options.Hooks, session.sandbox)
@@ -366,14 +375,14 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 			if openErr != nil {
 				return nil, openErr
 			}
-			availableTools := stageTools(tools.Builtins(session.sandbox, toolOptions), stageName)
+			availableTools := stageTools(append(tools.Builtins(session.sandbox, toolOptions), extraTools...), stageName)
 			return &erkaruntime.NativeBackend{Provider: provider, Tools: availableTools, Permissions: policy, Approver: approver, Hooks: hookRunner, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
 		}
 		pipelineResult, pipelineErr := engine.Run(runCtx, routing.PipelineRequest{TaskID: turn.TaskID, Objective: turn.Prompt, InitialRun: run, Resume: resumePipeline})
 		activeRunID, err = pipelineResult.RunID, pipelineErr
 		stage = erkaruntime.StageResult{Checkpoint: pipelineResult.Checkpoint, Status: pipelineResult.Status}
 	} else {
-		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, toolOptions), Permissions: policy, Approver: approver, Hooks: hookRunner, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
+		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: append(tools.Builtins(session.sandbox, toolOptions), extraTools...), Permissions: policy, Approver: approver, Hooks: hookRunner, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
 		stage, err = backend.RunStage(runCtx, erkaruntime.StageRequest{TaskID: turn.TaskID, RunID: run.ID, Objective: turn.Prompt}, session.database)
 	}
 	if activeRunID == "" {
@@ -432,6 +441,40 @@ func checkpointSummary(checkpoint erkaruntime.Checkpoint) string {
 	default:
 		return checkpoint.ApprovedPlan
 	}
+}
+
+// mcpTools starts the configured MCP servers once per session and returns
+// their tools. Servers that fail are reported once and skipped.
+func (session *Session) mcpTools() []erkaruntime.Tool {
+	if len(session.options.MCPServers) == 0 {
+		return nil
+	}
+	session.mcpOnce.Do(func() {
+		manager := mcp.Start(context.Background(), session.options.MCPServers, session.root, nil)
+		session.mu.Lock()
+		closed := session.closed
+		session.mcp = manager
+		session.mu.Unlock()
+		if closed {
+			_ = manager.Close()
+			return
+		}
+		if session.options.Output != nil {
+			for _, warning := range manager.Warnings() {
+				_, _ = fmt.Fprintf(session.options.Output, "warning: %s\n", warning)
+			}
+		}
+	})
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.mcp.Tools()
+}
+
+// MCPWarnings reports MCP servers or tools that could not be used.
+func (session *Session) MCPWarnings() []string {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.mcp.Warnings()
 }
 
 // permissionPolicy builds the tool policy for one turn. Without configured

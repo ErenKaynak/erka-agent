@@ -281,7 +281,7 @@ func configuredServerSessionFactory(resolved config.Resolved, manager *auth.Mana
 			WorkingDirectory: root, StateDir: resolved.StateDir, Pipeline: resolved,
 			ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(),
 			Limits: nativeLimits(resolved), AllowFullExecution: resolved.AllowFullExecution,
-			PermissionRules: resolved.PermissionRules, Approver: approver, Hooks: resolved.Hooks,
+			PermissionRules: resolved.PermissionRules, Approver: approver, Hooks: resolved.Hooks, MCPServers: resolved.MCPServers,
 		}
 		if resolved.ActivePipeline == "" {
 			key, _, err := resolveNativeKey(ctx, manager, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)

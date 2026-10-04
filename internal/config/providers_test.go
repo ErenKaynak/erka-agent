@@ -353,3 +353,24 @@ func TestRuntimeContextBudgetTokens(t *testing.T) {
 		t.Fatal("negative budget accepted")
 	}
 }
+
+func TestMCPServersLoadAndValidate(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	write := func(body string) (Resolved, error) {
+		if err := os.WriteFile(path, []byte("version: 1\nmcp_servers:\n"+body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(context.Background(), Options{ConfigPath: path, GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil)})
+	}
+	got, err := write("  github:\n    url: https://api.githubcopilot.com/mcp/\n    bearer_token_env: GITHUB_TOKEN\n  docs:\n    command: npx\n    args: [-y, docs-mcp]\n    read_only: true\n    timeout: 2m\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MCPServers["github"].BearerTokenEnv != "GITHUB_TOKEN" || !got.MCPServers["docs"].ReadOnly || got.MCPServers["docs"].Timeout.Minutes() != 2 {
+		t.Fatalf("servers = %#v", got.MCPServers)
+	}
+	if _, err := write("  bad:\n    url: http://remote.example/mcp\n"); err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("plain http error = %v", err)
+	}
+}
