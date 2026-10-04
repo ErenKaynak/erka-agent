@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/ErenKaynak/erka-agent/internal/auth"
 	"github.com/ErenKaynak/erka-agent/internal/bridges"
 	"github.com/ErenKaynak/erka-agent/internal/buildinfo"
+	"github.com/ErenKaynak/erka-agent/internal/commands"
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	"github.com/ErenKaynak/erka-agent/internal/providers/anthropic"
 	"github.com/ErenKaynak/erka-agent/internal/providers/deepseek"
@@ -321,6 +323,20 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 	return err
 }
 
+// loadCustomCommands reads project and user slash commands. Warnings are
+// printed before the TUI starts; a broken command never blocks startup.
+func loadCustomCommands(root, configPath string, output io.Writer) []commands.Command {
+	userDirectory := ""
+	if configPath != "" {
+		userDirectory = filepath.Join(filepath.Dir(configPath), "commands")
+	}
+	loaded, warnings := commands.Load(root, userDirectory, tui.ReservedCommandNames())
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintf(output, "warning: %s\n", warning)
+	}
+	return loaded
+}
+
 func headlessPermissionMode(resolved config.Resolved) app.PermissionMode {
 	if resolved.AutoApprovePermissions {
 		return app.PermissionModeAutoApprove
@@ -354,7 +370,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 			return err
 		}
 		defer session.Close()
-		model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: "pipeline", Model: resolved.ActivePipeline, Branch: session.Branch(ctx), Full: options.Full, Pipeline: true, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
+		model := tui.NewModel(tui.Options{Context: ctx, Controller: session, CustomCommands: loadCustomCommands(session.Root(), resolved.ConfigPath, output), TaskID: options.TaskID, Provider: "pipeline", Model: resolved.ActivePipeline, Branch: session.Branch(ctx), Full: options.Full, Pipeline: true, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
 		return tui.Run(model, input, output)
 	}
 	key, _, credentialErr := resolveNativeKey(ctx, manager, resolved.Provider, resolved.BaseURL, resolved.APIKeyEnv)
@@ -397,7 +413,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 		return err
 	}
 	defer session.Close()
-	model := tui.NewModel(tui.Options{Context: ctx, Controller: session, TaskID: options.TaskID, Provider: resolved.Provider, Model: resolved.Model, Branch: session.Branch(ctx), Full: options.Full, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
+	model := tui.NewModel(tui.Options{Context: ctx, Controller: session, CustomCommands: loadCustomCommands(session.Root(), resolved.ConfigPath, output), TaskID: options.TaskID, Provider: resolved.Provider, Model: resolved.Model, Branch: session.Branch(ctx), Full: options.Full, Live: live, Providers: providerStatusFunc(manager, resolved), Models: modelCatalogFunc(manager, resolved)})
 	return tui.Run(model, input, output)
 }
 

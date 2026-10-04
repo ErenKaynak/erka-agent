@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ErenKaynak/erka-agent/internal/app"
+	"github.com/ErenKaynak/erka-agent/internal/commands"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 )
 
@@ -513,5 +514,31 @@ func TestPipelineModelShowsPlanApprovalOverlay(t *testing.T) {
 	command()
 	if strings.Join(controller.decisions, ",") != "plan:run-1=false" {
 		t.Fatalf("decisions = %v", controller.decisions)
+	}
+}
+
+func TestModelExpandsCustomSlashCommands(t *testing.T) {
+	controller := &fakeController{}
+	custom := []commands.Command{{Name: "review", Description: "Review the diff", Template: "Review the diff for $ARGUMENTS."}}
+	model := NewModel(Options{Controller: controller, CustomCommands: custom})
+	model.composer.InsertString("/rev")
+	model.Update(key("tab"))
+	if model.composer.Value() != "/review" {
+		t.Fatalf("completion = %q", model.composer.Value())
+	}
+	model.composer.SetValue("/review error handling")
+	_, command := model.Update(key("enter"))
+	if command == nil {
+		t.Fatal("custom command did not submit")
+	}
+	command()
+	if len(controller.prompts) != 1 || controller.prompts[0] != "Review the diff for error handling." {
+		t.Fatalf("prompts = %v", controller.prompts)
+	}
+	if !strings.Contains(helpContents(custom), "/review — Review the diff") {
+		t.Fatal("help does not list custom commands")
+	}
+	if !ReservedCommandNames()["plan"] || ReservedCommandNames()["review"] {
+		t.Fatal("reserved names are wrong")
 	}
 }

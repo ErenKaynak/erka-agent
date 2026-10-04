@@ -14,6 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/ErenKaynak/erka-agent/internal/app"
+	"github.com/ErenKaynak/erka-agent/internal/commands"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 	"github.com/ErenKaynak/erka-agent/internal/store"
 )
@@ -46,10 +47,12 @@ type Options struct {
 	Full       bool
 	// Pipeline reports that turns run through a configured pipeline, where
 	// plan approval happens mid-run instead of after the turn.
-	Pipeline  bool
-	Live      <-chan erkaruntime.LiveUpdate
-	Providers ProviderStatusFunc
-	Models    ModelCatalogFunc
+	Pipeline bool
+	// CustomCommands are user slash commands expanded locally into prompts.
+	CustomCommands []commands.Command
+	Live           <-chan erkaruntime.LiveUpdate
+	Providers      ProviderStatusFunc
+	Models         ModelCatalogFunc
 }
 
 // ModelOption is one provider model eligible for one configured stage.
@@ -103,6 +106,7 @@ type Model struct {
 	unknown                          erkaruntime.ToolCall
 	permission                       erkaruntime.LiveUpdate
 	planMode, pipeline               bool
+	custom                           []commands.Command
 	providers                        ProviderStatusFunc
 	providerList                     []ProviderInfo
 	models                           ModelCatalogFunc
@@ -184,7 +188,7 @@ func NewModel(options Options) *Model {
 	transcript.SoftWrap = true
 	activity := viewport.New()
 	activity.SoftWrap = true
-	return &Model{ctx: ctx, controller: options.Controller, composer: composer, transcript: transcript, activity: activity, taskID: options.TaskID, provider: options.Provider, model: options.Model, branch: options.Branch, full: options.Full, pipeline: options.Pipeline, live: options.Live, providers: options.Providers, models: options.Models, modelSelections: make(map[erkaruntime.Stage]string), status: "ready"}
+	return &Model{ctx: ctx, controller: options.Controller, composer: composer, transcript: transcript, activity: activity, taskID: options.TaskID, provider: options.Provider, model: options.Model, branch: options.Branch, full: options.Full, pipeline: options.Pipeline, custom: options.CustomCommands, live: options.Live, providers: options.Providers, models: options.Models, modelSelections: make(map[erkaruntime.Stage]string), status: "ready"}
 }
 
 func (model *Model) Init() tea.Cmd { return tea.Batch(model.load(), model.waitLive()) }
@@ -401,7 +405,7 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.composer.InsertString("\n")
 			return model, nil
 		case "tab":
-			if completion := completeSlashCommand(model.composer.Value()); completion != "" {
+			if completion := completeSlashCommand(model.composer.Value(), model.custom); completion != "" {
 				model.composer.SetValue(completion)
 				return model, nil
 			}
@@ -587,6 +591,13 @@ func (model *Model) runSlashCommand(input string) tea.Cmd {
 			model.confirmExit = true
 		}
 	default:
+		for _, command := range model.custom {
+			if command.Name == name {
+				arguments := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))
+				model.status = "queueing /" + name
+				return model.submit(command.Expand(arguments))
+			}
+		}
 		model.status = "unknown command /" + name + " — use /help"
 	}
 	return nil
@@ -788,7 +799,7 @@ func (model *Model) render() string {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Width(model.width-34).Render(body), lipgloss.NewStyle().Width(32).BorderLeft(true).PaddingLeft(1).Render(model.activity.View()))
 	}
 	footerStatus := model.status + "  Enter send · Alt+Enter newline · ? help · Ctrl+C quit"
-	if suggestions := slashCommandSuggestions(model.composer.Value(), 4); len(suggestions) > 0 {
+	if suggestions := slashCommandSuggestions(model.composer.Value(), 4, model.custom); len(suggestions) > 0 {
 		footerStatus = "Commands: " + strings.Join(suggestions, " · ") + "  (Tab complete)"
 	}
 	footer := model.composer.View() + "\n" + muted.Render(footerStatus)
@@ -806,7 +817,7 @@ func (model *Model) render() string {
 	}
 	result := header + "\n" + body + "\n" + footer
 	if model.overlay == "help" {
-		return overlay(model.width, model.height, "Help", helpContents())
+		return overlay(model.width, model.height, "Help", helpContents(model.custom))
 	}
 	if model.overlay == "picker" {
 		var choices strings.Builder
@@ -997,7 +1008,19 @@ func fitOverlayText(value string, width, maxLines int) string {
 	return strings.Join(lines, "\n")
 }
 
-func helpContents() string {
+func helpContents(custom []commands.Command) string {
+	var extra strings.Builder
+	if len(custom) > 0 {
+		extra.WriteString("Custom commands\n")
+		for _, command := range custom {
+			line := "/" + command.Name
+			if command.Description != "" {
+				line += " — " + command.Description
+			}
+			extra.WriteString(Sanitize(line) + "\n")
+		}
+		extra.WriteString("\n")
+	}
 	return "Keys\n" +
 		"Enter send · Alt+Enter newline\n" +
 		"Ctrl+O sessions · Ctrl+N new\n" +
@@ -1007,8 +1030,9 @@ func helpContents() string {
 		"/help /new /sessions /diff\n" +
 		"/open <task-id>\n" +
 		"/permissions /full /workspace\n" +
-		"/cancel /status /provider /model /quit\n" +
+		"/cancel /status /provider /model /plan /quit\n" +
 		"Tab completes · // sends literal /\n\n" +
+		extra.String() +
 		"Esc or ? closes help"
 }
 
@@ -1118,7 +1142,7 @@ func (model *Model) modelsContents() string {
 	return builder.String()
 }
 
-func slashCommandSuggestions(value string, limit int) []string {
+func slashCommandSuggestions(value string, limit int, custom []commands.Command) []string {
 	value = strings.TrimSpace(value)
 	if limit <= 0 || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || strings.Contains(value, "\n") {
 		return nil
@@ -1129,18 +1153,36 @@ func slashCommandSuggestions(value string, limit int) []string {
 		if strings.HasPrefix(command.name, prefix) {
 			result = append(result, command.usage)
 			if len(result) == limit {
-				break
+				return result
+			}
+		}
+	}
+	for _, command := range custom {
+		if strings.HasPrefix(command.Name, prefix) {
+			result = append(result, "/"+command.Name)
+			if len(result) == limit {
+				return result
 			}
 		}
 	}
 	return result
 }
 
-func completeSlashCommand(value string) string {
+// ReservedCommandNames are built-in slash commands and aliases that custom
+// commands cannot shadow.
+func ReservedCommandNames() map[string]bool {
+	reserved := map[string]bool{"commands": true, "providers": true, "exit": true}
+	for _, command := range slashCommands {
+		reserved[command.name] = true
+	}
+	return reserved
+}
+
+func completeSlashCommand(value string, custom []commands.Command) string {
 	if strings.Contains(value, "\n") {
 		return ""
 	}
-	suggestions := slashCommandSuggestions(value, 1)
+	suggestions := slashCommandSuggestions(value, 1, custom)
 	if len(suggestions) == 0 {
 		return ""
 	}
