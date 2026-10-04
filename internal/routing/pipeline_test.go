@@ -122,7 +122,7 @@ func TestPipelineRepairsFailedValidationAndRevalidates(t *testing.T) {
 	responses := map[Stage][][]erkaruntime.ModelOutput{
 		StagePlanning:   {{{Kind: erkaruntime.ModelTextDelta, Text: "Plan."}, {Kind: erkaruntime.ModelCompleted}}},
 		StageCoding:     {{{Kind: erkaruntime.ModelTextDelta, Text: "Code."}, {Kind: erkaruntime.ModelCompleted}}},
-		StageValidation: {{{Kind: erkaruntime.ModelTextDelta, Text: "FAIL tests"}, {Kind: erkaruntime.ModelCompleted}}, {{Kind: erkaruntime.ModelTextDelta, Text: "PASS tests"}, {Kind: erkaruntime.ModelCompleted}}},
+		StageValidation: {{{Kind: erkaruntime.ModelTextDelta, Text: `{"status":"fail","failures":["TestCheckout failed"],"notes":""}`}, {Kind: erkaruntime.ModelCompleted}}, {{Kind: erkaruntime.ModelTextDelta, Text: `{"status":"pass","failures":[],"notes":"go test ./... ok"}`}, {Kind: erkaruntime.ModelCompleted}}},
 		StageRepair:     {{{Kind: erkaruntime.ModelTextDelta, Text: "Repair."}, {Kind: erkaruntime.ModelCompleted}}},
 		StageReview:     {{{Kind: erkaruntime.ModelTextDelta, Text: "Review passed."}, {Kind: erkaruntime.ModelCompleted}}},
 	}
@@ -197,6 +197,68 @@ func TestPipelineResumeContinuesAfterCompletedPlanningRun(t *testing.T) {
 	codingRun, loadErr := memory.LoadRun(context.Background(), result.RunID)
 	if loadErr != nil || codingRun.ID == completedPlanning.ID || codingRun.Stage != "coding" || codingRun.Status != erkaruntime.RunCompleted {
 		t.Fatalf("coding run = %#v, %v", codingRun, loadErr)
+	}
+}
+
+func TestPipelineTreatsMalformedValidationAsFailure(t *testing.T) {
+	t.Parallel()
+	for _, output := range []string{"PASS tests", "all good", `{"status":"PASS","failures":[],"notes":""}`, `{"status":"pass","failures":["x"],"notes":""}`} {
+		output := output
+		t.Run(output, func(t *testing.T) {
+			t.Parallel()
+			memory, initial, ids, now := seededPipeline(t)
+			resolved := pipelineConfig()
+			pipeline := resolved.Pipelines["default"]
+			pipeline.MaxRepairAttempts = 1
+			pipeline.Stages["validation"] = config.StageRoute{Candidates: []string{"coder/check"}}
+			pipeline.Stages["repair"] = config.StageRoute{Candidates: []string{"coder/c"}}
+			resolved.Pipelines["default"] = pipeline
+			responses := map[Stage][][]erkaruntime.ModelOutput{
+				StagePlanning:   {{{Kind: erkaruntime.ModelTextDelta, Text: "Plan."}, {Kind: erkaruntime.ModelCompleted}}},
+				StageCoding:     {{{Kind: erkaruntime.ModelTextDelta, Text: "Code."}, {Kind: erkaruntime.ModelCompleted}}},
+				StageValidation: {{{Kind: erkaruntime.ModelTextDelta, Text: output}, {Kind: erkaruntime.ModelCompleted}}, {{Kind: erkaruntime.ModelTextDelta, Text: output}, {Kind: erkaruntime.ModelCompleted}}},
+				StageRepair:     {{{Kind: erkaruntime.ModelTextDelta, Text: "Repair."}, {Kind: erkaruntime.ModelCompleted}}},
+			}
+			providers := make(map[Stage]*pipelineProvider)
+			engine := testPipelineEngine(memory, ids, now, resolved, func(_ context.Context, _ Candidate, stage Stage, limits erkaruntime.NativeLimits) (erkaruntime.StageBackend, error) {
+				provider := providers[stage]
+				if provider == nil {
+					provider = &pipelineProvider{name: "fixture", responses: responses[stage]}
+					providers[stage] = provider
+				}
+				return &erkaruntime.NativeBackend{Provider: provider, Instructions: "pipeline", Limits: limits, IDs: ids, Clock: func() time.Time { return now }}, nil
+			})
+			result, err := engine.Run(context.Background(), PipelineRequest{TaskID: "task-1", Objective: "fix checkout", InitialRun: initial})
+			if err == nil || result.Status != erkaruntime.TaskFailed {
+				t.Fatalf("Run() = %#v, %v; want validation failure", result, err)
+			}
+			if len(providers[StageValidation].Requests()) != 2 || len(providers[StageRepair].Requests()) != 1 {
+				t.Fatalf("validation=%d repair=%d", len(providers[StageValidation].Requests()), len(providers[StageRepair].Requests()))
+			}
+		})
+	}
+}
+
+func TestValidationPassedUsesStructuredReport(t *testing.T) {
+	t.Parallel()
+	pass := erkaruntime.ValidationReport{Status: erkaruntime.ValidationPass, Failures: []string{}}
+	fail := erkaruntime.ValidationReport{Status: erkaruntime.ValidationFail, Failures: []string{"boom"}}
+	cases := []struct {
+		name       string
+		checkpoint erkaruntime.Checkpoint
+		want       bool
+	}{
+		{"structured pass", erkaruntime.Checkpoint{Validation: &pass, ValidationResults: []string{"pass"}}, true},
+		{"structured fail", erkaruntime.Checkpoint{Validation: &fail, ValidationResults: []string{"fail: boom"}}, false},
+		{"structured fail overrides PASS text", erkaruntime.Checkpoint{Validation: &fail, ValidationResults: []string{"PASS"}}, false},
+		{"legacy PASS replays", erkaruntime.Checkpoint{ValidationResults: []string{"PASS all tests"}}, true},
+		{"legacy FAIL replays", erkaruntime.Checkpoint{ValidationResults: []string{"FAIL tests"}}, false},
+		{"legacy empty", erkaruntime.Checkpoint{}, false},
+	}
+	for _, testCase := range cases {
+		if got := validationPassed(testCase.checkpoint); got != testCase.want {
+			t.Errorf("%s: validationPassed() = %v, want %v", testCase.name, got, testCase.want)
+		}
 	}
 }
 

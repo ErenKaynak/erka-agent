@@ -413,7 +413,20 @@ func (engine *PipelineEngine) result(ctx context.Context, taskID erkaruntime.Tas
 	return result
 }
 
+// validationPassed reports the verdict recorded in a validation checkpoint.
+// Structured reports are authoritative; anything unparseable was already
+// recorded as a fail report when the checkpoint was created.
 func validationPassed(checkpoint erkaruntime.Checkpoint) bool {
+	if checkpoint.Validation != nil {
+		return checkpoint.Validation.Passed()
+	}
+	return legacyValidationPassed(checkpoint)
+}
+
+// legacyValidationPassed replays the verdict of checkpoints recorded before
+// structured validation existed, so resuming an older task follows the
+// decision that was durably made at the time. New checkpoints never use it.
+func legacyValidationPassed(checkpoint erkaruntime.Checkpoint) bool {
 	if len(checkpoint.ValidationResults) == 0 {
 		return false
 	}

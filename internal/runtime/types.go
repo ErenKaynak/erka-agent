@@ -88,6 +88,9 @@ type Checkpoint struct {
 	ValidationResults   []string `json:"validation_results"`
 	UnresolvedProblems  []string `json:"unresolved_problems"`
 	SuggestedNextAction string   `json:"suggested_next_action"`
+	// Validation is the structured verdict of a validation stage. It is nil for
+	// other stages and for checkpoints recorded before structured validation.
+	Validation *ValidationReport `json:"validation,omitempty"`
 }
 
 type RuntimeError struct {

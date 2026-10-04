@@ -379,6 +379,11 @@ func cloneItem(item erkaruntime.RuntimeItem) erkaruntime.RuntimeItem {
 		value.RelevantFiles = append([]string(nil), item.Checkpoint.RelevantFiles...)
 		value.ValidationResults = append([]string(nil), item.Checkpoint.ValidationResults...)
 		value.UnresolvedProblems = append([]string(nil), item.Checkpoint.UnresolvedProblems...)
+		if item.Checkpoint.Validation != nil {
+			report := *item.Checkpoint.Validation
+			report.Failures = append([]string(nil), item.Checkpoint.Validation.Failures...)
+			value.Validation = &report
+		}
 		result.Checkpoint = &value
 	}
 	if item.Error != nil {

@@ -145,6 +145,45 @@ func TestSQLitePersistsIncompleteToolCallForRecovery(t *testing.T) {
 	}
 }
 
+func TestSQLitePersistsStructuredValidationReport(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	filename := filepath.Join(t.TempDir(), "erka.db")
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	database, err := OpenSQLite(ctx, filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedSQLite(t, ctx, database, now)
+	report := erkaruntime.ValidationReport{Status: erkaruntime.ValidationFail, Failures: []string{"TestCheckout"}, Notes: "go test ./..."}
+	items := []erkaruntime.RuntimeItem{
+		{ID: "item-1", Sequence: 1, TaskID: "task-1", RunID: "run-1", Kind: erkaruntime.ItemCheckpoint, Time: now, Checkpoint: &erkaruntime.Checkpoint{Objective: "fix tests", ValidationResults: []string{report.Summary()}, Validation: &report}},
+		{ID: "item-2", Sequence: 2, TaskID: "task-1", RunID: "run-1", Kind: erkaruntime.ItemCheckpoint, Time: now, Checkpoint: &erkaruntime.Checkpoint{Objective: "fix tests", ValidationResults: []string{"PASS legacy"}}},
+	}
+	if _, err := database.Commit(ctx, erkaruntime.CommitRequest{TaskID: "task-1", Items: items}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSQLite(ctx, filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	loaded, err := reopened.LoadItems(ctx, "task-1", 0)
+	if err != nil || len(loaded) != 2 {
+		t.Fatalf("LoadItems() = %#v, %v", loaded, err)
+	}
+	got := loaded[0].Checkpoint.Validation
+	if got == nil || got.Status != erkaruntime.ValidationFail || len(got.Failures) != 1 || got.Failures[0] != "TestCheckout" || got.Notes != report.Notes {
+		t.Fatalf("structured report = %#v", got)
+	}
+	if loaded[1].Checkpoint.Validation != nil {
+		t.Fatalf("legacy checkpoint gained a report: %#v", loaded[1].Checkpoint.Validation)
+	}
+}
+
 func TestSQLiteFailedCommitRollsBack(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

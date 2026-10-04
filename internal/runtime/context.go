@@ -139,7 +139,7 @@ func StageInstructions(stage Stage) (string, error) {
 	case StageCoding:
 		return "You are erka's coding stage. Follow the durable approved plan, make the smallest correct workspace change, inspect the diff, and summarize the implementation. Never claim validation you did not run.", nil
 	case StageValidation:
-		return "You are erka's validation stage. Inspect the request, approved plan, current diff, and available test evidence. Run allowed validation tools when available and report concrete successes or failures without changing product code. Begin the final response with PASS or FAIL.", nil
+		return "You are erka's validation stage. Inspect the request, approved plan, current diff, and available test evidence. Run allowed validation tools when available and report concrete successes or failures without changing product code. Your final response must be exactly one JSON object and nothing else, matching {\"status\":\"pass\"|\"fail\",\"failures\":[string],\"notes\":string}. Use \"pass\" with an empty failures array only when validation succeeded; otherwise use \"fail\" and list each concrete failure. Any other final response is treated as a failure.", nil
 	case StageRepair:
 		return "You are erka's repair stage. Use the approved plan and latest validation failures, make only the changes required to repair them, then summarize what changed for revalidation.", nil
 	case StageReview:
@@ -163,7 +163,17 @@ func NewStageCheckpoint(stage Stage, objective, output string) (Checkpoint, erro
 		checkpoint.DiffSummary = output
 		checkpoint.Decisions = []string{output}
 	case StageValidation:
-		checkpoint.ValidationResults = []string{output}
+		report, decodeErr := DecodeValidationReport(output)
+		if decodeErr != nil {
+			report = invalidValidationReport(decodeErr)
+		}
+		checkpoint.Validation = &report
+		checkpoint.ValidationResults = []string{report.Summary()}
+		if decodeErr != nil {
+			// Keep the unstructured output so repair can still act on it; it is
+			// never interpreted as a verdict.
+			checkpoint.ValidationResults = append(checkpoint.ValidationResults, output)
+		}
 	case StageReview:
 		checkpoint.Decisions = []string{output}
 		checkpoint.SuggestedNextAction = "Inspect the final review and working-tree diff."
@@ -189,6 +199,12 @@ func contextItemBytes(item RuntimeItem) int64 {
 		for _, values := range [][]string{checkpoint.Constraints, checkpoint.Decisions, checkpoint.RelevantFiles, checkpoint.ValidationResults, checkpoint.UnresolvedProblems} {
 			for _, value := range values {
 				size += int64(len(value))
+			}
+		}
+		if report := checkpoint.Validation; report != nil {
+			size += int64(len(report.Status) + len(report.Notes))
+			for _, failure := range report.Failures {
+				size += int64(len(failure))
 			}
 		}
 	}

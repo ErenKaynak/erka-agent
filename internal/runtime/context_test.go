@@ -71,9 +71,23 @@ func TestNewStageCheckpointUsesProviderNeutralFields(t *testing.T) {
 	if err != nil || plan.ApprovedPlan == "" || len(plan.Decisions) != 1 {
 		t.Fatalf("planning checkpoint = %#v, %v", plan, err)
 	}
-	validation, err := NewStageCheckpoint(StageValidation, "fix", "tests passed")
-	if err != nil || len(validation.ValidationResults) != 1 || validation.DiffSummary != "" {
+	validation, err := NewStageCheckpoint(StageValidation, "fix", `{"status":"pass","failures":[],"notes":"ok"}`)
+	if err != nil || len(validation.ValidationResults) != 1 || validation.DiffSummary != "" || !validation.Validation.Passed() {
 		t.Fatalf("validation checkpoint = %#v, %v", validation, err)
+	}
+}
+
+func TestNewStageCheckpointRecordsMalformedValidationAsFail(t *testing.T) {
+	t.Parallel()
+	checkpoint, err := NewStageCheckpoint(StageValidation, "fix", "PASS: tests passed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Validation == nil || checkpoint.Validation.Status != ValidationFail || len(checkpoint.Validation.Failures) != 1 {
+		t.Fatalf("validation report = %#v", checkpoint.Validation)
+	}
+	if len(checkpoint.ValidationResults) != 2 || checkpoint.ValidationResults[1] != "PASS: tests passed" {
+		t.Fatalf("validation results = %#v", checkpoint.ValidationResults)
 	}
 }
 
