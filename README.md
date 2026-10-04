@@ -108,6 +108,74 @@ overrides the credential environment name. Secrets do not belong in YAML—
 `ERKA_DEEPSEEK_API_KEY` is read by the trusted provider adapter and excluded
 from tool subprocess environments.
 
+### Project instructions, permissions, hooks, and context
+
+**AGENTS.md.** erka reads the repository's root `AGENTS.md` and any nested
+`AGENTS.md` files (hidden and vendored directories are skipped) on every turn
+and adds them after the stage instructions, labeled with the directory each
+one governs. They are treated as repository content: they guide the work but
+cannot override erka's own rules. The total is capped at 32 KiB; larger sets
+are listed by path so the model can read them on demand.
+
+**Editing.** Besides `apply_patch`, native stages can use `edit_file`
+(`path`, `old_str`, `new_str`). `old_str` must match the file exactly once;
+zero or multiple matches are reported back without changing the file.
+
+**Permission rules.** Rules are evaluated for every tool call; deny wins over
+ask, which wins over allow:
+
+```yaml
+permissions:
+  rules:
+    allow: ["run_command(go test *)", "run_command(go vet *)", "edit_file(internal/*)"]
+    ask:   ["apply_patch", "edit_file(internal/server/*)"]
+    deny:  ["run_command(rm *)", "run_command(git push *)", "edit_file(*.env)"]
+```
+
+A rule is a tool name (`apply_patch`, `mcp__github__*`) or a tool name with an
+argument pattern. Patterns match the space-joined argv for `run_command`, the
+normalized path for file tools, and every touched path for `apply_patch`; `*`
+matches any characters, including spaces and `/`. Allow-list commands as
+specifically as you can, because arguments are matched literally.
+
+Without rules nothing changes: `run_command` exists only with `--full`. An
+allow or ask rule for `run_command` offers it without `--full`, restricted to
+the allowed patterns; other commands then need approval. `--full` still means
+unrestricted, and deny rules always apply. "Ask" decisions come from the TUI
+approval prompt, are refused by `erka run` unless `--yes` is passed, and
+become `tool_permission` approvals on `erka serve` that remote clients decide
+with `erka approve`/`erka reject` (they expire after an hour). Every deny or
+ask outcome is stored before the tool runs, so `--resume` replays it instead
+of asking again.
+
+**Hooks.** Commands can run after successful edits:
+
+```yaml
+hooks:
+  post_edit:
+    - match: "*.go"
+      command: [gofmt, -w, "{path}"]
+      timeout: 30s
+```
+
+`{path}` is replaced inside individual arguments (never through a shell).
+Hooks run in the workspace sandbox with its filtered environment; their output
+is appended to the tool result and recorded as `hook.completed` or
+`hook.failed` events.
+
+**Context compaction.** When context reaches 80% of its budget, erka asks the
+stage's model to summarize older work, stores that summary durably, and
+continues with the summary in place of the older items (checkpoints and the
+latest request are always kept). The compaction is recorded as a
+`context.compacted` event, and resume reuses the stored summary. The budget is
+a stage's `max_input_tokens`, else `runtime.context_budget_tokens`, else the
+model's context window:
+
+```yaml
+runtime:
+  context_budget_tokens: 120000
+```
+
 ### Providers and credential kinds
 
 Every provider has a fixed, code-owned list of credential kinds it may use:
