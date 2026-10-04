@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ErenKaynak/erka-agent/internal/config"
+	"github.com/ErenKaynak/erka-agent/internal/hooks"
 	"github.com/ErenKaynak/erka-agent/internal/permissions"
 	"github.com/ErenKaynak/erka-agent/internal/projectdocs"
 	"github.com/ErenKaynak/erka-agent/internal/routing"
@@ -42,6 +43,8 @@ type SessionOptions struct {
 	// Approver answers "ask" verdicts; when nil, PermissionMode decides.
 	Approver       erkaruntime.PermissionApprover
 	PermissionMode PermissionMode
+	// Hooks are post-edit commands from configuration.
+	Hooks hooks.Config
 }
 
 type ProviderFactory func(context.Context, routing.Candidate) (erkaruntime.ModelProvider, error)
@@ -115,6 +118,10 @@ func OpenSession(ctx context.Context, options SessionOptions) (*Session, error) 
 	now := options.Clock().UTC()
 	acquired, err := database.AcquireLease(ctx, store.Lease{ProjectID: project, Holder: holder, UpdatedAt: now, ExpiresAt: now.Add(leaseDuration)})
 	if err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	if err := options.Hooks.Validate(); err != nil {
 		_ = database.Close()
 		return nil, err
 	}
@@ -335,6 +342,14 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 		return LocalResult{}, false, err
 	}
 	approver := session.approver()
+	var hookRunner erkaruntime.ToolHook
+	if !session.options.Hooks.Empty() {
+		runner, hookErr := hooks.NewRunner(session.options.Hooks, session.sandbox)
+		if hookErr != nil {
+			return LocalResult{}, false, hookErr
+		}
+		hookRunner = runner
+	}
 	stage := erkaruntime.StageResult{}
 	activeRunID := run.ID
 	if session.options.Pipeline.ActivePipeline != "" {
@@ -352,13 +367,13 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 				return nil, openErr
 			}
 			availableTools := stageTools(tools.Builtins(session.sandbox, toolOptions), stageName)
-			return &erkaruntime.NativeBackend{Provider: provider, Tools: availableTools, Permissions: policy, Approver: approver, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
+			return &erkaruntime.NativeBackend{Provider: provider, Tools: availableTools, Permissions: policy, Approver: approver, Hooks: hookRunner, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
 		}
 		pipelineResult, pipelineErr := engine.Run(runCtx, routing.PipelineRequest{TaskID: turn.TaskID, Objective: turn.Prompt, InitialRun: run, Resume: resumePipeline})
 		activeRunID, err = pipelineResult.RunID, pipelineErr
 		stage = erkaruntime.StageResult{Checkpoint: pipelineResult.Checkpoint, Status: pipelineResult.Status}
 	} else {
-		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, toolOptions), Permissions: policy, Approver: approver, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
+		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, toolOptions), Permissions: policy, Approver: approver, Hooks: hookRunner, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
 		stage, err = backend.RunStage(runCtx, erkaruntime.StageRequest{TaskID: turn.TaskID, RunID: run.ID, Objective: turn.Prompt}, session.database)
 	}
 	if activeRunID == "" {

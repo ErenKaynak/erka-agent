@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ErenKaynak/erka-agent/internal/config"
+	"github.com/ErenKaynak/erka-agent/internal/hooks"
 	"github.com/ErenKaynak/erka-agent/internal/permissions"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 )
@@ -35,6 +36,7 @@ type LocalOptions struct {
 	BridgeFactory      BridgeFactory
 	PermissionRules    permissions.Rules
 	PermissionMode     PermissionMode
+	Hooks              hooks.Config
 }
 
 type LocalResult struct {
@@ -51,7 +53,7 @@ func RunLocal(ctx context.Context, options LocalOptions) (LocalResult, error) {
 	if options.Provider == nil && options.Pipeline.ActivePipeline == "" {
 		return LocalResult{}, errors.New("local run requires a model provider")
 	}
-	session, err := OpenSession(ctx, SessionOptions{WorkingDirectory: options.WorkingDirectory, StateDir: options.StateDir, Provider: options.Provider, NativeModel: options.NativeModel, Output: options.Output, IDs: options.IDs, Clock: options.Clock, Limits: options.Limits, AllowFullExecution: options.AllowFullExecution, Pipeline: options.Pipeline, ProviderFactory: options.ProviderFactory, BridgeFactory: options.BridgeFactory, PermissionRules: options.PermissionRules, PermissionMode: options.PermissionMode})
+	session, err := OpenSession(ctx, SessionOptions{WorkingDirectory: options.WorkingDirectory, StateDir: options.StateDir, Provider: options.Provider, NativeModel: options.NativeModel, Output: options.Output, IDs: options.IDs, Clock: options.Clock, Limits: options.Limits, AllowFullExecution: options.AllowFullExecution, Pipeline: options.Pipeline, ProviderFactory: options.ProviderFactory, BridgeFactory: options.BridgeFactory, PermissionRules: options.PermissionRules, PermissionMode: options.PermissionMode, Hooks: options.Hooks})
 	if err != nil {
 		return LocalResult{}, err
 	}

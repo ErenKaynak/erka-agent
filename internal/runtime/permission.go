@@ -91,3 +91,18 @@ func (record PermissionRecord) Validate() error {
 	}
 	return nil
 }
+
+// HookOutcome is the result of one hook command run after a tool call.
+type HookOutcome struct {
+	Name   string
+	Path   string
+	Output string
+	Failed bool
+}
+
+// ToolHook runs after every successful tool call (for example post-edit
+// formatters). Hooks are user-configured and their outcomes are appended to
+// the tool result and recorded as hook events.
+type ToolHook interface {
+	AfterTool(context.Context, ToolCall, ToolExecutionResult) []HookOutcome
+}

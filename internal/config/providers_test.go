@@ -313,3 +313,25 @@ func TestPermissionRulesLoadAndValidate(t *testing.T) {
 		t.Fatalf("invalid rule error = %v", err)
 	}
 }
+
+func TestHooksLoadAndValidate(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "version: 1\nhooks:\n  post_edit:\n    - match: \"*.go\"\n      command: [gofmt, -w, \"{path}\"]\n      timeout: 45s\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(context.Background(), Options{ConfigPath: path, GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Hooks.PostEdit) != 1 || got.Hooks.PostEdit[0].Command[2] != "{path}" || got.Hooks.PostEdit[0].Timeout.Seconds() != 45 {
+		t.Fatalf("hooks = %#v", got.Hooks)
+	}
+	if err := os.WriteFile(path, []byte("version: 1\nhooks:\n  post_edit:\n    - match: \"*.go\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(context.Background(), Options{ConfigPath: path, GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil)}); err == nil {
+		t.Fatal("hook without a command was accepted")
+	}
+}

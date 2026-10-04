@@ -276,7 +276,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 				return fmt.Errorf("get working directory: %w", err)
 			}
 		}
-		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved), PermissionRules: resolved.PermissionRules, PermissionMode: headlessPermissionMode(resolved)})
+		_, err := app.RunLocal(ctx, app.LocalOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Objective: objective, ResumeTaskID: resume, Output: output, AllowFullExecution: resolved.AllowFullExecution, Pipeline: resolved, ProviderFactory: factory, BridgeFactory: configuredBridgeFactory(), Limits: nativeLimits(resolved), PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, PermissionMode: headlessPermissionMode(resolved)})
 		return err
 	}
 	providerName, baseURL := resolved.Provider, resolved.BaseURL
@@ -310,6 +310,7 @@ func runConfigured(ctx context.Context, resolved config.Resolved, objective stri
 		Limits:             nativeLimits(resolved),
 		PermissionRules:    resolved.PermissionRules,
 		PermissionMode:     headlessPermissionMode(resolved),
+		Hooks:              resolved.Hooks,
 	})
 	return err
 }
@@ -342,7 +343,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 			default:
 			}
 		})
-		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, PermissionRules: resolved.PermissionRules, PermissionMode: app.PermissionModeInteractive})
+		session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Pipeline: resolved, ProviderFactory: configuredProviderFactory(manager), BridgeFactory: configuredBridgeFactory(), Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, PermissionMode: app.PermissionModeInteractive})
 		if err != nil {
 			return err
 		}
@@ -385,7 +386,7 @@ func launchConfigured(ctx context.Context, resolved config.Resolved, options tui
 		default:
 		}
 	})
-	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider, PermissionRules: resolved.PermissionRules, PermissionMode: app.PermissionModeInteractive})
+	session, err := app.OpenSession(ctx, app.SessionOptions{WorkingDirectory: workingDirectory, StateDir: resolved.StateDir, Provider: provider, NativeModel: resolved.Model, Observer: observer, Limits: nativeLimits(resolved), AllowFullExecution: options.Full, RebuildProvider: rebuildProvider, PermissionRules: resolved.PermissionRules, Hooks: resolved.Hooks, PermissionMode: app.PermissionModeInteractive})
 	if err != nil {
 		return err
 	}

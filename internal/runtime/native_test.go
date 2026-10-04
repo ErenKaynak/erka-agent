@@ -689,3 +689,42 @@ func TestRecoveredCallReplaysRecordedPermission(t *testing.T) {
 		t.Fatalf("asked = %d, tool calls = %d; the recorded decision must be replayed", asked, tool.calls)
 	}
 }
+
+type hookFunc func(context.Context, erkaruntime.ToolCall, erkaruntime.ToolExecutionResult) []erkaruntime.HookOutcome
+
+func (function hookFunc) AfterTool(ctx context.Context, call erkaruntime.ToolCall, result erkaruntime.ToolExecutionResult) []erkaruntime.HookOutcome {
+	return function(ctx, call, result)
+}
+
+func TestNativeBackendAppendsHookOutcomesAndEvents(t *testing.T) {
+	t.Parallel()
+	memory, request, now := seededRuntime(t)
+	tool := &fakeTool{name: "edit_file", mutating: true, output: "edited a.go"}
+	backend := testBackend(permissionScript("edit_file"), &recordingSink{}, now, tool)
+	backend.Hooks = hookFunc(func(_ context.Context, call erkaruntime.ToolCall, result erkaruntime.ToolExecutionResult) []erkaruntime.HookOutcome {
+		return []erkaruntime.HookOutcome{{Name: "gofmt -w a.go", Path: "a.go"}, {Name: "golint a.go", Path: "a.go", Output: "a.go:1: bad", Failed: true}}
+	})
+	if _, err := backend.RunStage(context.Background(), request, memory); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := memory.LoadItems(context.Background(), request.TaskID, 0)
+	var output string
+	for _, item := range items {
+		if item.Kind == erkaruntime.ItemToolResult {
+			output = item.ToolResult.Output
+		}
+	}
+	if output != "edited a.go\n[hook gofmt -w a.go: ok]\n[hook golint a.go: failed]\na.go:1: bad" {
+		t.Fatalf("tool result = %q", output)
+	}
+	events, _ := memory.LoadEvents(context.Background(), request.TaskID, 0)
+	var types []string
+	for _, event := range events {
+		if strings.HasPrefix(event.Type, "hook.") {
+			types = append(types, event.Type)
+		}
+	}
+	if strings.Join(types, ",") != "hook.completed,hook.failed" {
+		t.Fatalf("hook events = %v", types)
+	}
+}

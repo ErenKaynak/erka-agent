@@ -16,6 +16,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/ErenKaynak/erka-agent/internal/hooks"
 	"github.com/ErenKaynak/erka-agent/internal/permissions"
 )
 
@@ -74,9 +75,11 @@ type Resolved struct {
 	// AutoApprovePermissions answers every "ask" verdict with allow. It is
 	// set only by `erka run --yes` and never read from configuration.
 	AutoApprovePermissions bool
-	ActivePipeline         string
-	Connections            map[string]Connection
-	Pipelines              map[string]Pipeline
+	// Hooks are user-configured commands run after workspace edits.
+	Hooks          hooks.Config
+	ActivePipeline string
+	Connections    map[string]Connection
+	Pipelines      map[string]Pipeline
 }
 
 // Connection names either a native provider endpoint or an explicitly labeled
@@ -168,6 +171,7 @@ type fileConfig struct {
 		MaxOutputTokens int64  `yaml:"max_output_tokens,omitempty"`
 		StageTimeout    string `yaml:"stage_timeout,omitempty"`
 	} `yaml:"runtime,omitempty"`
+	Hooks       hooks.Config `yaml:"hooks,omitempty"`
 	Permissions struct {
 		AllowFullExecution bool `yaml:"allow_full_execution,omitempty"`
 		Rules              struct {
@@ -258,6 +262,7 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 			}
 		}
 		resolved.AllowFullExecution = loaded.Permissions.AllowFullExecution
+		resolved.Hooks = loaded.Hooks
 		resolved.PermissionRules = permissions.Rules{Allow: loaded.Permissions.Rules.Allow, Ask: loaded.Permissions.Rules.Ask, Deny: loaded.Permissions.Rules.Deny}
 		resolved.ActivePipeline = loaded.Pipeline
 		resolved.Connections = loaded.Connections
@@ -369,6 +374,9 @@ func Load(ctx context.Context, options Options) (Resolved, error) {
 		return Resolved{}, errors.New("runtime limits must be positive")
 	}
 	if err := resolved.PermissionRules.Validate(); err != nil {
+		return Resolved{}, err
+	}
+	if err := resolved.Hooks.Validate(); err != nil {
 		return Resolved{}, err
 	}
 	if err := validateRouting(&resolved); err != nil {

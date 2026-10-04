@@ -87,9 +87,11 @@ type NativeBackend struct {
 	Permissions PermissionPolicy
 	// Approver decides "ask" verdicts. Nil denies them.
 	Approver PermissionApprover
-	Limits   NativeLimits
-	IDs      IDGenerator
-	Clock    func() time.Time
+	// Hooks run after successful tool calls (for example post-edit gofmt).
+	Hooks  ToolHook
+	Limits NativeLimits
+	IDs    IDGenerator
+	Clock  func() time.Time
 }
 
 func (*NativeBackend) BackendClass() string { return BackendNative }
@@ -228,6 +230,13 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 					result = ToolExecutionResult{Output: executeErr.Error(), IsError: true}
 				}
 			}
+			var hookEvents []pendingEvent
+			if allowed && !result.IsError && prepared.Hooks != nil {
+				result, hookEvents = applyHooks(result, call, prepared.Hooks.AfterTool(ctx, call, result))
+				if err := ctx.Err(); err != nil {
+					return StageResult{}, err
+				}
+			}
 			result, consumed := boundToolResult(result, prepared.Limits.MaxCumulativeToolOutputBytes-toolOutputBytes)
 			toolOutputBytes += consumed
 			item := RuntimeItem{
@@ -245,7 +254,7 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 				Type: eventType, Message: fmt.Sprintf("%s finished", call.Tool),
 				Data: eventData(map[string]any{"tool": call.Tool, "call_id": call.CallID, "truncated": result.Truncated}),
 			}
-			committed, err := appender.append(ctx, []RuntimeItem{item}, []pendingEvent{event})
+			committed, err := appender.append(ctx, []RuntimeItem{item}, append([]pendingEvent{event}, hookEvents...))
 			if err != nil {
 				return StageResult{}, err
 			}
@@ -603,6 +612,33 @@ func (backend *preparedBackend) authorize(ctx context.Context, appender *durable
 		return false, "", nil, err
 	}
 	return record.Action == PermissionAllow, denialMessage(record), committed, nil
+}
+
+// applyHooks appends hook output to the tool result so the model sees, for
+// example, that gofmt rewrote the file, and returns one event per hook.
+func applyHooks(result ToolExecutionResult, call ToolCall, outcomes []HookOutcome) (ToolExecutionResult, []pendingEvent) {
+	if len(outcomes) == 0 {
+		return result, nil
+	}
+	var builder strings.Builder
+	builder.WriteString(result.Output)
+	events := make([]pendingEvent, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		status, eventType := "ok", "hook.completed"
+		if outcome.Failed {
+			status, eventType = "failed", "hook.failed"
+		}
+		builder.WriteString(fmt.Sprintf("\n[hook %s: %s]", outcome.Name, status))
+		if output := strings.TrimSpace(outcome.Output); output != "" {
+			builder.WriteString("\n" + output)
+		}
+		events = append(events, pendingEvent{
+			Type: eventType, Message: fmt.Sprintf("hook %s %s", outcome.Name, status),
+			Data: eventData(map[string]any{"hook": outcome.Name, "path": outcome.Path, "tool": call.Tool, "call_id": call.CallID, "failed": outcome.Failed}),
+		})
+	}
+	result.Output = builder.String()
+	return result, events
 }
 
 func recordedPermission(history []RuntimeItem, callID ToolCallID) *PermissionRecord {
