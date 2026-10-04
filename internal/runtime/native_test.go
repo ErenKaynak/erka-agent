@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -564,4 +565,21 @@ func (sink *recordingSink) Count() int {
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
 	return len(sink.events)
+}
+
+func TestNativeBackendAppendsProjectInstructionsAfterStageInstructions(t *testing.T) {
+	t.Parallel()
+	memory, request, now := seededRuntime(t)
+	provider := &scriptedProvider{responses: [][]erkaruntime.ModelOutput{{
+		{Kind: erkaruntime.ModelTextDelta, Text: "Done."}, {Kind: erkaruntime.ModelCompleted},
+	}}}
+	backend := testBackend(provider, &recordingSink{}, now)
+	backend.ProjectInstructions = "<agents_md path=\"AGENTS.md\">Run go test.</agents_md>"
+	if _, err := backend.RunStage(context.Background(), request, memory); err != nil {
+		t.Fatal(err)
+	}
+	requests := provider.requests
+	if len(requests) != 1 || !strings.HasPrefix(requests[0].Instructions, "Use the provided tools") || !strings.HasSuffix(requests[0].Instructions, "Run go test.</agents_md>") {
+		t.Fatalf("instructions = %q", requests[0].Instructions)
+	}
 }

@@ -79,9 +79,12 @@ type NativeBackend struct {
 	Sink         EventSink
 	Observer     LiveObserver
 	Instructions string
-	Limits       NativeLimits
-	IDs          IDGenerator
-	Clock        func() time.Time
+	// ProjectInstructions (for example rendered AGENTS.md files) are appended
+	// after the stage instructions so the stable prefix stays cacheable.
+	ProjectInstructions string
+	Limits              NativeLimits
+	IDs                 IDGenerator
+	Clock               func() time.Time
 }
 
 func (*NativeBackend) BackendClass() string { return BackendNative }
@@ -148,6 +151,9 @@ func (backend *NativeBackend) RunStage(ctx context.Context, request StageRequest
 				return StageResult{}, prepared.fail(ctx, appender, "context_compile_failed", compileErr)
 			}
 			instructions, modelItems = packet.Instructions, packet.Items
+		}
+		if project := strings.TrimSpace(prepared.ProjectInstructions); project != "" {
+			instructions += "\n\n" + project
 		}
 		modelRequest := ModelRequest{
 			Instructions:    instructions,

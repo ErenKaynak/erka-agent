@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ErenKaynak/erka-agent/internal/config"
+	"github.com/ErenKaynak/erka-agent/internal/projectdocs"
 	"github.com/ErenKaynak/erka-agent/internal/routing"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 	"github.com/ErenKaynak/erka-agent/internal/sandbox"
@@ -315,6 +316,9 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 	leaseDone := make(chan struct{})
 	go session.maintainLease(runCtx, cancel, leaseDone)
 	defer func() { close(leaseDone); session.mu.Lock(); session.cancel = nil; session.mu.Unlock(); cancel() }()
+	// AGENTS.md is read fresh for every turn so edits take effect on the next
+	// prompt. A missing or unreadable file simply contributes nothing.
+	projectInstructions, _ := projectdocs.Load(runCtx, session.sandbox)
 	stage := erkaruntime.StageResult{}
 	activeRunID := run.ID
 	var err error
@@ -333,13 +337,13 @@ func (session *Session) execute(ctx context.Context, turn store.Turn, run erkaru
 				return nil, openErr
 			}
 			availableTools := stageTools(tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), stageName)
-			return &erkaruntime.NativeBackend{Provider: provider, Tools: availableTools, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
+			return &erkaruntime.NativeBackend{Provider: provider, Tools: availableTools, Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: limits, IDs: session.options.IDs, Clock: session.options.Clock}, nil
 		}
 		pipelineResult, pipelineErr := engine.Run(runCtx, routing.PipelineRequest{TaskID: turn.TaskID, Objective: turn.Prompt, InitialRun: run, Resume: resumePipeline})
 		activeRunID, err = pipelineResult.RunID, pipelineErr
 		stage = erkaruntime.StageResult{Checkpoint: pipelineResult.Checkpoint, Status: pipelineResult.Status}
 	} else {
-		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
+		backend := &erkaruntime.NativeBackend{Provider: session.options.Provider, Tools: tools.Builtins(session.sandbox, tools.Options{AllowFullExecution: allowFullExecution}), Sink: &writerSink{writer: session.options.Output}, Observer: session.options.Observer, Instructions: nativeInstructions, ProjectInstructions: projectInstructions, Limits: session.options.Limits, IDs: session.options.IDs, Clock: session.options.Clock}
 		stage, err = backend.RunStage(runCtx, erkaruntime.StageRequest{TaskID: turn.TaskID, RunID: run.ID, Objective: turn.Prompt}, session.database)
 	}
 	if activeRunID == "" {
