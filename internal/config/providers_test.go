@@ -160,3 +160,49 @@ func containsString(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestOpenAICompatibleConnections(t *testing.T) {
+	t.Parallel()
+	got, err := loadConnections(t, `
+  local:
+    provider: openai_compatible
+    base_url: http://localhost:11434/v1
+  router:
+    provider: openai_compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local := got.Connections["local"]; local.APIKeyEnv != "" || local.Credential != CredentialAPIKey {
+		t.Fatalf("local = %#v", local)
+	}
+	if router := got.Connections["router"]; router.APIKeyEnv != "OPENROUTER_API_KEY" {
+		t.Fatalf("router = %#v", router)
+	}
+	if _, err := loadConnections(t, `
+  broken:
+    provider: openai_compatible`); err == nil || !strings.Contains(err.Error(), "requires base_url") {
+		t.Fatalf("missing base_url error = %v", err)
+	}
+}
+
+func TestTopLevelOpenAICompatibleProvider(t *testing.T) {
+	t.Parallel()
+	options := Options{GOOS: "linux", HomeDir: "/home/erka", LookupEnv: lookup(nil), Provider: "openai_compatible", Model: "qwen3-coder", BaseURL: "http://localhost:11434/v1"}
+	got, err := Load(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.APIKeyEnv != "" || got.BaseURL != "http://localhost:11434/v1" {
+		t.Fatalf("resolved = %#v", got)
+	}
+	options.BaseURL = ""
+	if _, err := Load(context.Background(), options); err == nil || !strings.Contains(err.Error(), "base URL") {
+		t.Fatalf("missing base URL error = %v", err)
+	}
+	options.BaseURL, options.Model = "http://localhost:11434/v1", ""
+	if _, err := Load(context.Background(), options); err == nil || !strings.Contains(err.Error(), "model") {
+		t.Fatalf("missing model error = %v", err)
+	}
+}

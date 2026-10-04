@@ -61,6 +61,10 @@ var providerSpecs = map[string]ProviderSpec{
 		Name: "openai", Class: ConnectionNative, Credentials: []CredentialKind{CredentialAPIKey},
 		DefaultBaseURL: DefaultOpenAIURL, DefaultAPIKeyEnv: "OPENAI_API_KEY", RequiresModel: true,
 	},
+	"openai_compatible": {
+		Name: "openai_compatible", Class: ConnectionNative, Credentials: []CredentialKind{CredentialAPIKey},
+		APIKeyOptional: true, RequiresModel: true,
+	},
 	"codex": {
 		Name: "codex", Class: ConnectionSubscriptionBridge, Credentials: []CredentialKind{CredentialVendorCLIBridge},
 		DefaultCommand: "codex",

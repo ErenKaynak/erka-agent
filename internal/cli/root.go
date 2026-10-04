@@ -20,6 +20,7 @@ import (
 	"github.com/ErenKaynak/erka-agent/internal/config"
 	"github.com/ErenKaynak/erka-agent/internal/providers/deepseek"
 	"github.com/ErenKaynak/erka-agent/internal/providers/openai"
+	"github.com/ErenKaynak/erka-agent/internal/providers/openaicompat"
 	"github.com/ErenKaynak/erka-agent/internal/routing"
 	erkaruntime "github.com/ErenKaynak/erka-agent/internal/runtime"
 	"github.com/ErenKaynak/erka-agent/internal/tui"
@@ -525,6 +526,8 @@ func openNativeProvider(providerName, baseURL, model, key string) (erkaruntime.M
 		return deepseek.New(deepseek.Options{APIKey: key, BaseURL: baseURL, Model: model})
 	case "openai":
 		return openai.New(openai.Options{APIKey: key, BaseURL: baseURL, Model: model})
+	case openaicompat.Name:
+		return openaicompat.New(openaicompat.Options{APIKey: key, BaseURL: baseURL, Model: model})
 	default:
 		return nil, fmt.Errorf("unsupported native provider %q", providerName)
 	}
